@@ -430,7 +430,6 @@ char* pg_get_tableschemadef_string(Oid tableRelationId,
                                          defaultString);
                     } else {
                         Oid seqOid = GetSequenceOid(tableRelationId, defaultValue->adnum);
-                        auto seqValues = get_sequence_values(seqOid);
 
                         /* @FIXME: if we support distributed sequence, following code
                          * should be removed */
