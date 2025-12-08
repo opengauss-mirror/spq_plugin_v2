@@ -87,7 +87,8 @@ endif
 override PGCFLAGS := $(shell $(PG_CONFIG) --cflags)
 override OG_THIRD_BIN_PATH := $(shell echo ${THIRD_BIN_PATH})
 override OG_CODE_BASE := $(shell echo ${CODE_BASE})
-override THIRD_PARTY_INCLUDE:=-I '$(OG_THIRD_BIN_PATH)/kernel/dependency/libobs/comm/include'
+override THIRD_PARTY_INCLUDE := -I '$(OG_THIRD_BIN_PATH)/kernel/dependency/libobs/comm/include' \
+								-I '$(OG_THIRD_BIN_PATH)/kernel/dependency/openssl/comm/include'
 override THIRD_PARTY_INCLUDE += -I '$(OG_CODE_BASE)/src/include'
 override THIRD_PARTY_INCLUDE += -I '$(spq_abs_top_srcdir)/vendor/safestringlib/include'
 

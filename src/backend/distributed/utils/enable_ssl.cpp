@@ -226,11 +226,7 @@ static bool CreateCertificatesWhenNeeded()
      * postgres' initialization but that will happen when postgres reloads its
      * configuration with ssl enabled.
      */
-#ifdef HAVE_OPENSSL_INIT_SSL
     OPENSSL_init_ssl(OPENSSL_INIT_LOAD_CONFIG, NULL);
-#else
-    SSL_library_init();
-#endif
 
     sslContext = SSL_CTX_new(SSLv23_method());
     if (!sslContext) {
