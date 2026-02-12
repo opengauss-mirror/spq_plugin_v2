@@ -49,6 +49,10 @@
 /* Define to 1 if you have the <unistd.h> header file. */
 #undef HAVE_UNISTD_H
 
+/* openGauss numeric version (e.g. 70000 for 7.x, 60000 for 6.x; 0 for
+   non-openGauss) */
+#undef OPENGAUSS_VERSION_NUM
+
 /* Define to the address where bug reports for this package should be sent. */
 #undef PACKAGE_BUGREPORT
 

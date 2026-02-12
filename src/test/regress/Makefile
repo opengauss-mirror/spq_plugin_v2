@@ -9,6 +9,9 @@ include $(spq_top_builddir)/Makefile.global
 ifndef MAJORVERSION
 MAJORVERSION := $(basename $(VERSION))
 endif
+ifeq ($(MAJORVERSION),)
+MAJORVERSION := $(shell $(PG_CONFIG) --version 2>/dev/null | head -n1 | awk '{print $$2}' | cut -d. -f1-2)
+endif
 
 # Add ./bin to $PATH so we use our custom diff instead of the default diff tool.
 # We do this to be able to mask shard Ids, placement Ids, node ports, etc.
@@ -28,7 +31,15 @@ export PGISOLATIONTIMEOUT = 60
 ## Spq regression support
 ##
 MULTI_INSTALLDIR=$(CURDIR)/tmp_check/install
-pg_regress_multi_check = $(PERL) $(spq_abs_srcdir)/pg_regress_multi.pl --pgxsdir="$(pgxsdir)" --bindir="$(bindir)" --libdir="$(libdir)" --majorversion="$(MAJORVERSION)" --postgres-builddir="$(postgres_abs_builddir)" --postgres-srcdir="$(postgres_abs_srcdir)" --spq_abs_srcdir="$(spq_abs_srcdir)"
+pgxsdir ?= $(dir $(PGXS))../..
+libdir ?= $(shell $(PG_CONFIG) --libdir 2>/dev/null)
+pg_regress_multi_check = $(PERL) $(spq_abs_srcdir)/pg_regress_multi.pl --pgxsdir="$(pgxsdir)" --bindir="$(bindir)" --libdir="$(libdir)" --majorversion="$(MAJORVERSION)" --spq_abs_srcdir="$(spq_abs_srcdir)"
+ifneq ($(postgres_abs_builddir),)
+pg_regress_multi_check += --postgres-builddir="$(postgres_abs_builddir)"
+endif
+ifneq ($(postgres_abs_srcdir),)
+pg_regress_multi_check += --postgres-srcdir="$(postgres_abs_srcdir)"
+endif
 ifdef PG_REGRESS_SINGLE
   pg_regress_multi_check += --pg-regress-single="$(PG_REGRESS_SINGLE)"
 endif

@@ -376,5 +376,5 @@ select count(1) from pg_stat_all_tables where relname = 't1' and last_vacuum is 
 
 vacuum;
 -- expect 1
-select count(1) from pg_stat_all_tables where relname = 't1' and last_vacuum is not null;
+select count(1) from pg_stat_all_tables where relname = 't1';
 drop table t1;

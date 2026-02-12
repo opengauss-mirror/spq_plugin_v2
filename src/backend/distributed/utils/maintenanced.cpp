@@ -571,7 +571,9 @@ void CitusMaintenanceDaemonMain(const BgWorkerContext* bwc)
             if (backgroundTasksQueueBgwHandle != nullptr) {
                 backgroundTasksQueueBgwHandle = nullptr;
                 /* Quit and return all bgworkers launched by this thread. */
-                BgworkerListSyncQuit();
+                if (!IsBgWorkerProcess()) {
+                    BgworkerListSyncQuit();
+                }
             }
 
             StartTransactionCommand();

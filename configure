@@ -2598,14 +2598,22 @@ fi
 
 # check we're building against a supported version of PostgreSQL
 spqac_pg_config_version=$($PG_CONFIG --version 2>/dev/null)
-version_num=$(echo "$spqac_pg_config_version"|
-              $SED -e 's/^PostgreSQL \([0-9]*\)\(\.[0-9]*\)\{0,1\}\(.*\)$/\1\2/')
+opengauss_major_version=$(echo "$spqac_pg_config_version" |
+                          $SED -n -e 's/.*openGauss \([0-9]*\)\(\..*\)\{0,1\}$/\1/p')
+if test -n "$opengauss_major_version"; then
+  version_num=$opengauss_major_version
+  OPENGAUSS_VERSION_NUM="${opengauss_major_version}0000"
+else
+  version_num=$(echo "$spqac_pg_config_version"|
+                $SED -e 's/^PostgreSQL \([0-9]*\)\(\.[0-9]*\)\{0,1\}\(.*\)$/\1\2/')
 
-# if PostgreSQL version starts with two digits, the major version is those digits
-version_num=$(echo "$version_num"| $SED -e 's/^\([0-9]\{2\}\)\(.*\)$/\1/')
+  # if PostgreSQL version starts with two digits, the major version is those digits
+  version_num=$(echo "$version_num"| $SED -e 's/^\([0-9]\{2\}\)\(.*\)$/\1/')
+  OPENGAUSS_VERSION_NUM=0
+fi
 
 if test -z "$version_num"; then
-  as_fn_error $? "Could not detect PostgreSQL version from pg_config." "$LINENO" 5
+  as_fn_error $? "Could not detect openGauss/PostgreSQL version from pg_config." "$LINENO" 5
 fi
 
 
@@ -2635,8 +2643,16 @@ fi
 
 
 if test "$with_pg_version_check" = no; then
-    { $as_echo "$as_me:${as_lineno-$LINENO}: building against PostgreSQL $version_num (skipped compatibility check)" >&5
-$as_echo "$as_me: building against PostgreSQL $version_num (skipped compatibility check)" >&6;}
+    { $as_echo "$as_me:${as_lineno-$LINENO}: building against openGauss/PostgreSQL $version_num (skipped compatibility check)" >&5
+$as_echo "$as_me: building against openGauss/PostgreSQL $version_num (skipped compatibility check)" >&6;}
+elif test -n "$opengauss_major_version"; then
+   if test "$version_num" != '6' -a "$version_num" != '7'; then
+      { $as_echo "$as_me:${as_lineno-$LINENO}: WARNING: Spq is not compatible with the detected openGauss version ${version_num}." >&5
+$as_echo "$as_me: WARNING: Spq is not compatible with the detected openGauss version ${version_num}." >&2;}
+   else
+      { $as_echo "$as_me:${as_lineno-$LINENO}: building against openGauss $version_num" >&5
+$as_echo "$as_me: building against openGauss $version_num" >&6;}
+   fi
 elif test "$version_num" != '15' -a  "$version_num" != '16' -a  "$version_num" != '17'; then
    { $as_echo "$as_me:${as_lineno-$LINENO}: WARNING: Spq is not compatible with the detected PostgreSQL version ${version_num}." >&5
 $as_echo "$as_me: WARNING: Spq is not compatible with the detected PostgreSQL version ${version_num}." >&2;}
@@ -2644,6 +2660,22 @@ else
    { $as_echo "$as_me:${as_lineno-$LINENO}: building against PostgreSQL $version_num" >&5
 $as_echo "$as_me: building against PostgreSQL $version_num" >&6;}
 fi;
+
+# Detect openGauss version and define OPENGAUSS_VERSION_NUM
+{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for openGauss version" >&5
+$as_echo_n "checking for openGauss version... " >&6; }
+if test "$OPENGAUSS_VERSION_NUM" -gt 0; then
+  { $as_echo "$as_me:${as_lineno-$LINENO}: result: $OPENGAUSS_VERSION_NUM" >&5
+$as_echo "$OPENGAUSS_VERSION_NUM" >&6; }
+else
+  { $as_echo "$as_me:${as_lineno-$LINENO}: result: not openGauss, defaulting to 0" >&5
+$as_echo "not openGauss, defaulting to 0" >&6; }
+fi
+
+cat >>confdefs.h <<_ACEOF
+#define OPENGAUSS_VERSION_NUM $OPENGAUSS_VERSION_NUM
+_ACEOF
+
 
 # Check whether we're building inside the source tree, if not, prepare
 # the build directory.

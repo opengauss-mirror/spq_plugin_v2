@@ -34,6 +34,7 @@
 #include <unordered_map>
 #include <set>
 #include <vector>
+#include <sstream>
 
 namespace Spq {
 /*

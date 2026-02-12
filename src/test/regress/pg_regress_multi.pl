@@ -153,7 +153,21 @@ $ENV{PG_REGRESS_DIFF_OPTS} = '-dU10 -w';
 
 my $plainRegress = "$ENV{CODE_BASE}/src/test/regress/pg_regress";
 if ($pgregressSingle ne "" ) {
-    my $plainRegress = $pgregressSingle;
+    $plainRegress = $pgregressSingle;
+} elsif ($ENV{CODE_BASE}) {
+    my $defaultSingle = catfile($ENV{CODE_BASE}, "tmp_build", "src", "test", "regress", "pg_regress_single");
+    if (-x $defaultSingle) {
+        $plainRegress = $defaultSingle;
+    }
+}
+
+if (!$ENV{CODE_BASE_SRC} && $ENV{CODE_BASE}) {
+    my $codeBaseSrc = catfile($ENV{CODE_BASE}, "src");
+    if (-d $codeBaseSrc) {
+        $ENV{CODE_BASE_SRC} = $codeBaseSrc;
+    } else {
+        $ENV{CODE_BASE_SRC} = $ENV{CODE_BASE};
+    }
 }
 
 my $isolationRegress = "";

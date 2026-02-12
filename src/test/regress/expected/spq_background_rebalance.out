@@ -56,10 +56,10 @@ select * from spq_shards;
  t1         | 2000009 | txx_xxxx | distributed | localhost |    58639 |      24576
 (10 rows)
 
-SELECT spq_add_node('localhost', :worker_2_port);
- spq_add_node
+SELECT spq_add_node('localhost', :worker_2_port) > 0 AS node_added;
+ node_added
 ---------------------------------------------------------------------
-           10
+ t
 (1 row)
 
 select spq_rebalance_start();

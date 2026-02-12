@@ -39,6 +39,18 @@
 #include "utils/ruleutils.h"
 #endif
 #include "utils/syscache.h"
+#include "spq_config.h"
+
+/*
+ * Compatibility: SearchSysCacheAttNum was added in openGauss master after 6.0.0
+ * OPENGAUSS_VERSION_NUM is defined in spq_config.h based on openGauss version.
+ */
+#if OPENGAUSS_VERSION_NUM < 70000
+static inline HeapTuple SearchSysCacheAttNum(Oid relid, int16 attnum)
+{
+    return SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum));
+}
+#endif
 
 #include "distributed/commands.h"
 #include "distributed/commands/utility_hook.h"

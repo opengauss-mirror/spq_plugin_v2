@@ -31,6 +31,123 @@
 #include "utils/snapmgr.h"
 
 #include "pg_version_constants.h"
+#include "spq_config.h"
+
+/*
+ * Compatibility: planstate_tree_walker was added in openGauss master after 6.0.0
+ * This is a complete implementation matching the master branch behavior.
+ */
+#if OPENGAUSS_VERSION_NUM < 70000
+typedef bool (*planstate_tree_walker_callback)(struct PlanState* planstate,
+                                               void* context);
+
+/* Forward declarations for helper functions */
+static bool planstate_walk_subplans_compat(List* plans,
+                                           planstate_tree_walker_callback walker,
+                                           void* context);
+static bool planstate_walk_members_compat(PlanState** planstates, int nplans,
+                                          planstate_tree_walker_callback walker,
+                                          void* context);
+
+#define PSWALK_COMPAT(n) walker(n, context)
+
+static bool planstate_walk_subplans_compat(List* plans,
+                                           planstate_tree_walker_callback walker,
+                                           void* context)
+{
+    ListCell* lc;
+    foreach (lc, plans) {
+        SubPlanState* sps = (SubPlanState*)lfirst(lc);
+        if (PSWALK_COMPAT(sps->planstate))
+            return true;
+    }
+    return false;
+}
+
+static bool planstate_walk_members_compat(PlanState** planstates, int nplans,
+                                          planstate_tree_walker_callback walker,
+                                          void* context)
+{
+    for (int j = 0; j < nplans; j++) {
+        if (PSWALK_COMPAT(planstates[j]))
+            return true;
+    }
+    return false;
+}
+
+static inline bool planstate_tree_walker_impl(PlanState* planstate,
+                                              planstate_tree_walker_callback walker,
+                                              void* context)
+{
+    if (planstate == NULL)
+        return false;
+
+    Plan* plan = planstate->plan;
+
+    /* initPlan-s */
+    if (planstate_walk_subplans_compat(planstate->initPlan, walker, context))
+        return true;
+
+    /* lefttree */
+    if (outerPlanState(planstate)) {
+        if (PSWALK_COMPAT(outerPlanState(planstate)))
+            return true;
+    }
+
+    /* righttree */
+    if (innerPlanState(planstate)) {
+        if (PSWALK_COMPAT(innerPlanState(planstate)))
+            return true;
+    }
+
+    /* special child plans */
+    if (plan != NULL) {
+        switch (nodeTag(plan)) {
+            case T_Append:
+                if (planstate_walk_members_compat(((AppendState*)planstate)->appendplans,
+                                                  ((AppendState*)planstate)->as_nplans,
+                                                  walker, context))
+                    return true;
+                break;
+            case T_MergeAppend:
+                if (planstate_walk_members_compat(
+                        ((MergeAppendState*)planstate)->mergeplans,
+                        ((MergeAppendState*)planstate)->ms_nplans, walker, context))
+                    return true;
+                break;
+            case T_BitmapAnd:
+                if (planstate_walk_members_compat(
+                        ((BitmapAndState*)planstate)->bitmapplans,
+                        ((BitmapAndState*)planstate)->nplans, walker, context))
+                    return true;
+                break;
+            case T_BitmapOr:
+                if (planstate_walk_members_compat(
+                        ((BitmapOrState*)planstate)->bitmapplans,
+                        ((BitmapOrState*)planstate)->nplans, walker, context))
+                    return true;
+                break;
+            case T_SubqueryScan:
+                if (PSWALK_COMPAT(((SubqueryScanState*)planstate)->subplan))
+                    return true;
+                break;
+            default:
+                break;
+        }
+    }
+
+    /* subPlan-s */
+    if (planstate_walk_subplans_compat(planstate->subPlan, walker, context))
+        return true;
+
+    return false;
+}
+
+#undef PSWALK_COMPAT
+
+#define planstate_tree_walker(ps, w, c) \
+    planstate_tree_walker_impl(ps, (planstate_tree_walker_callback)(w), c)
+#endif
 
 #include "distributed/backend_data.h"
 #include "distributed/citus_custom_scan.h"

@@ -28,6 +28,11 @@
 #include "catalog/dependency.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_aggregate.h"
+#include "spq_config.h"
+/* Compatibility: AGGKIND_HYPOTHETICAL was added in openGauss master after 6.0.0 */
+#if OPENGAUSS_VERSION_NUM < 70000 && !defined(AGGKIND_HYPOTHETICAL)
+#define AGGKIND_HYPOTHETICAL 'h'
+#endif
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "commands/extension.h"

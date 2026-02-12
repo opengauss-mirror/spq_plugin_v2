@@ -20,6 +20,7 @@
  */
 #include "postgres.h"
 
+#include <new> /* for placement new */
 #include "commands/seclabel.h"
 #include "distributed/commands.h"
 #include "distributed/session_ctx.h"

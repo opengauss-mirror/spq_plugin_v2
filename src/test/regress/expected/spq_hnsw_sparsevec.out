@@ -1,4 +1,5 @@
 SET spq.propagate_set_commands = 'local';
+\set VERBOSITY terse
 -- L2
 CREATE TABLE t2 (id int, val sparsevec(3));
 SELECT create_distributed_table('t2', 'id', shard_count:=4);
@@ -298,11 +299,9 @@ SELECT create_distributed_table('t2', 'id', shard_count:=4);
 INSERT INTO t2 (id, val) VALUES (1, array_fill(1, ARRAY[1001])::vector::sparsevec);
 CREATE INDEX ON t2 USING hnsw (val sparsevec_l2_ops);
 ERROR:  sparsevec cannot have more than 1000 non-zero elements for hnsw index
-CONTEXT:  while executing command on localhost:xxxxx
 TRUNCATE t2;
 CREATE INDEX ON t2 USING hnsw (val sparsevec_l2_ops);
 INSERT INTO t2 (id, val) VALUES (2, array_fill(1, ARRAY[1001])::vector::sparsevec);
 ERROR:  sparsevec cannot have more than 1000 non-zero elements for hnsw index
-CONTEXT:  while executing command on localhost:xxxxx
 DROP TABLE t2;
 SET spq.propagate_set_commands = DEFAULT;

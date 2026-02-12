@@ -18,6 +18,7 @@
  */
 
 #include "distributed/utils/spq_io_multiplex.h"
+#include <new> /* for placement new */
 #include <sys/epoll.h>
 #ifdef HAVE_POLL_H
 #include <poll.h>
