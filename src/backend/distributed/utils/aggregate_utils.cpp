@@ -20,6 +20,7 @@
 #include "pg_config_manual.h"
 
 #include "access/htup.h"
+#include "access/tupdesc.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
@@ -32,6 +33,57 @@
 #include "utils/typcache.h"
 
 #include "distributed/version_compat.h"
+#include "spq_config.h"
+
+/*
+ * Compatibility: AggGetAggref and TupleDescCopyEntry were added in openGauss master.
+ * For 6.0.0, we need to provide our own implementations.
+ * OPENGAUSS_VERSION_NUM is defined in spq_config.h based on openGauss version.
+ */
+#if OPENGAUSS_VERSION_NUM < 70000
+/* openGauss 6.0.0 - provide compatibility implementations */
+
+typedef struct Aggref* fmAggrefPtr;
+
+/*
+ * Partial mirror of AggStatePerAggData - only the fields we need.
+ * This must match the beginning of the actual AggStatePerAggData structure
+ * defined in executor/node/nodeAgg.h
+ */
+typedef struct SpqAggStatePerAggDataPartial {
+    AggrefExprState* aggrefstate;
+    Aggref* aggref;
+} SpqAggStatePerAggDataPartial;
+
+static inline fmAggrefPtr AggGetAggref(FunctionCallInfo fcinfo)
+{
+    if (fcinfo->context && IsA(fcinfo->context, AggState)) {
+        AggStatePerAgg curperagg = ((AggState*)fcinfo->context)->curperagg;
+        if (curperagg) {
+            SpqAggStatePerAggDataPartial* peragg =
+                (SpqAggStatePerAggDataPartial*)curperagg;
+            return peragg->aggref;
+        }
+    }
+    return NULL;
+}
+
+static inline void TupleDescCopyEntry(TupleDesc dst, AttrNumber dstAttno, TupleDesc src,
+                                      AttrNumber srcAttno)
+{
+    Form_pg_attribute dstAtt = &dst->attrs[dstAttno];
+    Form_pg_attribute srcAtt = &src->attrs[srcAttno];
+
+    /* Copy the attribute structure */
+    errno_t rc =
+        memcpy_s(dstAtt, ATTRIBUTE_FIXED_PART_SIZE, srcAtt, ATTRIBUTE_FIXED_PART_SIZE);
+    securec_check(rc, "", "");
+
+    /* Update the attribute number */
+    dstAtt->attnum = dstAttno + 1;
+}
+
+#endif /* OPENGAUSS_VERSION_NUM < 70000 */
 
 PG_FUNCTION_INFO_V1(worker_partial_agg_sfunc);
 PG_FUNCTION_INFO_V1(worker_partial_agg_ffunc);

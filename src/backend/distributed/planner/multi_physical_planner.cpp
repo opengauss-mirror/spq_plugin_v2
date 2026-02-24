@@ -54,6 +54,7 @@
 #include "utils/typcache.h"
 
 #include "pg_version_constants.h"
+#include "og_version_compat.h"
 
 #include "distributed/backend_data.h"
 #include "distributed/citus_nodefuncs.h"
@@ -5080,7 +5081,7 @@ static Node* AdjustImproperForDeparseNodes(Node* inputNode, void* context)
         }
 
         cstringToText->constvalue =
-            stringTypeDatum(textType, constvalue, NULL, NULL, cstringToText->consttypmod);
+            stringTypeDatum_compat(textType, constvalue, cstringToText->consttypmod);
         ReleaseSysCache(textType);
         return inputNode;
     } else if (IsA(inputNode, Query)) {

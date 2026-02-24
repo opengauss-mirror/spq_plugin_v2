@@ -19,6 +19,7 @@
  */
 
 #include "distributed/context/thread_context.h"
+#include <new> /* for placement new */
 #include "access/hash.h"
 #include "utils/hashutils.h"
 

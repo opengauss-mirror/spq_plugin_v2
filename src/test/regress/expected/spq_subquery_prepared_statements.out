@@ -3,6 +3,7 @@
 -- ===================================================================
 CREATE SCHEMA subquery_prepared_statements;
 SET search_path TO subquery_prepared_statements, public;
+SET plan_cache_mode = force_custom_plan;
 CREATE TYPE subquery_prepared_statements.xy AS (x int, y int);
 PREPARE subquery_prepare_without_param AS
 SELECT
@@ -104,4 +105,5 @@ ERROR:  the query contains a join that requires repartitioning
 HINT:  repartitioning is not supported in current version.
 DROP SCHEMA subquery_prepared_statements CASCADE;
 NOTICE:  drop cascades to type xy
+RESET plan_cache_mode;
 SET search_path TO public;

@@ -91,6 +91,7 @@
 #include "utils/ruleutils.h"
 #endif
 #include "pg_version_constants.h"
+#include "og_version_compat.h"
 
 #include "distributed/distributed_planner.h"
 #include "distributed/listutils.h"
@@ -1063,10 +1064,10 @@ static void AddPartitionKeyRestrictionToInstance(ClauseWalkerContext* context,
 Const* TransformPartitionRestrictionValue(Var* partitionColumn, Const* restrictionValue,
                                           bool missingOk)
 {
-    Node* transformedValue =
-        coerce_to_target_type(NULL, (Node*)restrictionValue, restrictionValue->consttype,
-                              partitionColumn->vartype, partitionColumn->vartypmod,
-                              COERCION_ASSIGNMENT, COERCE_IMPLICIT_CAST, NULL, NULL, -1);
+    Node* transformedValue = coerce_to_target_type_compat(
+        NULL, (Node*)restrictionValue, restrictionValue->consttype,
+        partitionColumn->vartype, partitionColumn->vartypmod, COERCION_ASSIGNMENT,
+        COERCE_IMPLICIT_CAST, -1);
 
     /* if NULL, no implicit coercion is possible between the types */
     if (transformedValue == NULL) {

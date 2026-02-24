@@ -4,6 +4,7 @@
 CREATE SCHEMA subquery_prepared_statements;
 
 SET search_path TO subquery_prepared_statements, public;
+SET plan_cache_mode = force_custom_plan;
 
 CREATE TYPE subquery_prepared_statements.xy AS (x int, y int);
 
@@ -78,4 +79,5 @@ EXECUTE subquery_prepare_param_non_partkey(1);
 EXECUTE subquery_prepare_param_non_partkey(1);
 
 DROP SCHEMA subquery_prepared_statements CASCADE;
+RESET plan_cache_mode;
 SET search_path TO public;

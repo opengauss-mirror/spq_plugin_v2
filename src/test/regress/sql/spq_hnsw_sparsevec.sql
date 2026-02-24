@@ -1,4 +1,5 @@
 SET spq.propagate_set_commands = 'local';
+\set VERBOSITY terse
 -- L2
 
 CREATE TABLE t2 (id int, val sparsevec(3));

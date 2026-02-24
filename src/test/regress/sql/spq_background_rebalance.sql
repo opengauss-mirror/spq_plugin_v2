@@ -31,7 +31,7 @@ select create_distributed_table('t1', 'id', shard_count:=10);
 
 select * from spq_shards;
 
-SELECT spq_add_node('localhost', :worker_2_port);
+SELECT spq_add_node('localhost', :worker_2_port) > 0 AS node_added;
 
 select spq_rebalance_start();
 

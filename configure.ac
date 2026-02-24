@@ -75,14 +75,22 @@ fi
 
 # check we're building against a supported version of PostgreSQL
 spqac_pg_config_version=$($PG_CONFIG --version 2>/dev/null)
-version_num=$(echo "$spqac_pg_config_version"|
-              $SED -e 's/^PostgreSQL \([[0-9]]*\)\(\.[[0-9]]*\)\{0,1\}\(.*\)$/\1\2/')
+opengauss_major_version=$(echo "$spqac_pg_config_version" |
+                          $SED -n -e 's/.*openGauss \([[0-9]]*\)\(\..*\)\{0,1\}$/\1/p')
+if test -n "$opengauss_major_version"; then
+  version_num=$opengauss_major_version
+  OPENGAUSS_VERSION_NUM="${opengauss_major_version}0000"
+else
+  version_num=$(echo "$spqac_pg_config_version"|
+                $SED -e 's/^PostgreSQL \([[0-9]]*\)\(\.[[0-9]]*\)\{0,1\}\(.*\)$/\1\2/')
 
-# if PostgreSQL version starts with two digits, the major version is those digits
-version_num=$(echo "$version_num"| $SED -e 's/^\([[0-9]]\{2\}\)\(.*\)$/\1/')
+  # if PostgreSQL version starts with two digits, the major version is those digits
+  version_num=$(echo "$version_num"| $SED -e 's/^\([[0-9]]\{2\}\)\(.*\)$/\1/')
+  OPENGAUSS_VERSION_NUM=0
+fi
 
 if test -z "$version_num"; then
-  AC_MSG_ERROR([Could not detect PostgreSQL version from pg_config.])
+  AC_MSG_ERROR([Could not detect openGauss/PostgreSQL version from pg_config.])
 fi
 
 PGAC_ARG_BOOL(with, pg-version-check, yes,
@@ -90,12 +98,28 @@ PGAC_ARG_BOOL(with, pg-version-check, yes,
 AC_SUBST(with_pg_version_check)
 
 if test "$with_pg_version_check" = no; then
-    AC_MSG_NOTICE([building against PostgreSQL $version_num (skipped compatibility check)])
+    AC_MSG_NOTICE([building against openGauss/PostgreSQL $version_num (skipped compatibility check)])
+elif test -n "$opengauss_major_version"; then
+   if test "$version_num" != '6' -a "$version_num" != '7'; then
+      AC_MSG_WARN([Spq is not compatible with the detected openGauss version ${version_num}.])
+   else
+      AC_MSG_NOTICE([building against openGauss $version_num])
+   fi
 elif test "$version_num" != '15' -a  "$version_num" != '16' -a  "$version_num" != '17'; then
    AC_MSG_WARN([Spq is not compatible with the detected PostgreSQL version ${version_num}.])
 else
    AC_MSG_NOTICE([building against PostgreSQL $version_num])
 fi;
+
+# Detect openGauss version and define OPENGAUSS_VERSION_NUM
+AC_MSG_CHECKING([for openGauss version])
+if test "$OPENGAUSS_VERSION_NUM" -gt 0; then
+  AC_MSG_RESULT([$OPENGAUSS_VERSION_NUM])
+else
+  AC_MSG_RESULT([not openGauss, defaulting to 0])
+fi
+AC_DEFINE_UNQUOTED([OPENGAUSS_VERSION_NUM], [$OPENGAUSS_VERSION_NUM],
+                   [openGauss numeric version (e.g. 70000 for 7.x, 60000 for 6.x; 0 for non-openGauss)])
 
 # Check whether we're building inside the source tree, if not, prepare
 # the build directory.

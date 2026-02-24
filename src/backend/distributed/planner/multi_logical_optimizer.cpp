@@ -41,6 +41,7 @@
 #include "utils/syscache.h"
 
 #include "pg_version_constants.h"
+#include "og_version_compat.h"
 
 #include "distributed/citus_nodes.h"
 #include "distributed/citus_ruleutils.h"
@@ -2066,17 +2067,10 @@ static Expr* AddTypeConversion(Node* originalAggregate, Node* newExpression)
     if (originalTypeId == newTypeId) {
         return NULL;
     }
-#ifdef DISABLE_OG_COMMENTS
     /* otherwise, add a type conversion function */
-    Node* typeConvertedExpression = coerce_to_target_type(
+    Node* typeConvertedExpression = coerce_to_target_type_compat(
         NULL, newExpression, newTypeId, originalTypeId, originalTypeMod,
         COERCION_EXPLICIT, COERCE_EXPLICIT_CAST, -1);
-#else
-    /* otherwise, add a type conversion function */
-    Node* typeConvertedExpression = coerce_to_target_type(
-        NULL, newExpression, newTypeId, originalTypeId, originalTypeMod,
-        COERCION_EXPLICIT, COERCE_EXPLICIT_CAST, NULL, NULL, -1);
-#endif
     Assert(typeConvertedExpression != NULL);
     return (Expr*)typeConvertedExpression;
 }

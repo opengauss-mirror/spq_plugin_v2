@@ -14,6 +14,7 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 
+#include <new> /* for placement new */
 #include "access/hash.h"
 #include "access/htup.h"
 #include "catalog/pg_authid.h"
