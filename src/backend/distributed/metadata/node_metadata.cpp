@@ -185,6 +185,9 @@ Datum spq_set_coordinator_host(PG_FUNCTION_ARGS)
     int32 nodePort = PG_GETARG_INT32(1);
     char* nodeNameString = text_to_cstring(nodeName);
 
+    // Validate IP address and port
+    CheckIPPort(nodeNameString, nodePort);
+
     NodeMetadata nodeMetadata = DefaultNodeMetadata();
     nodeMetadata.groupId = 0;
     nodeMetadata.shouldHaveShards = false;
@@ -265,7 +268,8 @@ Datum spq_add_node(PG_FUNCTION_ARGS)
     NodeMetadata nodeMetadata = DefaultNodeMetadata();
     bool nodeAlreadyExists = false;
     nodeMetadata.groupId = PG_GETARG_INT32(2);
-
+    // Validate IP address and port
+    CheckIPPort(nodeNameString, nodePort);
     /*
      * During tests this function is called before nodeRole and nodeCluster have been
      * created.
@@ -325,7 +329,8 @@ Datum spq_add_inactive_node(PG_FUNCTION_ARGS)
     int32 nodePort = PG_GETARG_INT32(1);
     char* nodeNameString = text_to_cstring(nodeName);
     Name nodeClusterName = PG_GETARG_NAME(4);
-
+    // Validate IP address and port
+    CheckIPPort(nodeNameString, nodePort);
     NodeMetadata nodeMetadata = DefaultNodeMetadata();
     bool nodeAlreadyExists = false;
     nodeMetadata.groupId = PG_GETARG_INT32(2);
@@ -1133,7 +1138,7 @@ Datum spq_update_node(PG_FUNCTION_ARGS)
     int32 lock_cooldown = PG_GETARG_INT32(4);
 
     char* newNodeNameString = text_to_cstring(newNodeName);
-
+    CheckIPPort(newNodeNameString, newNodePort);
     WorkerNode* workerNodeWithSameAddress =
         FindWorkerNodeAnyCluster(newNodeNameString, newNodePort);
     if (workerNodeWithSameAddress != NULL) {

@@ -20,4 +20,11 @@ extern char* ConvertIntToString(int val);
 extern char* pg_clean_ascii(const char* str, int alloc_flags);
 
 bool SplitGUCList(char* rawstring, char separator, List** namelist);
+
+/* IP address, hostname and port validation functions */
+extern bool IsValidIPAddress(const char* ip);
+extern bool IsValidHostname(const char* hostname);
+extern bool IsValidPort(int port);
+extern bool ValidateNodeAddress(const char* address, int port);
+extern void CheckIPPort(const char* ip, int port);
 #endif /* CITUS_STRING_UTILS_H */
