@@ -39,8 +39,9 @@
 #include "distributed/version_compat.h"
 
 /* forward declaration of background worker entrypoint */
+#ifdef DISABLE_OG_COMMENTS
 extern PGDLLEXPORT void LockAcquireHelperMain(Datum main_arg);
-
+#endif
 /* forward declaration of helper functions */
 static void lock_acquire_helper_sigterm(SIGNAL_ARGS);
 static void EnsureStopLockAcquireHelper(void* arg);
@@ -169,14 +170,14 @@ static bool ShouldAcquireLock(long sleepms)
  * LockAcquireHelperMain runs in a dynamic background worker to help spq_update_node to
  * acquire its locks.
  */
+#ifdef DISABLE_OG_COMMENTS
 void LockAcquireHelperMain(Datum main_arg)
 {
     int backendPid = DatumGetInt32(main_arg);
     StringInfoData sql;
-#ifdef DISABLE_OG_COMMENTS
+
     LockAcquireHelperArgs* args = (LockAcquireHelperArgs*)MyBgworkerEntry->bgw_extra;
-#endif
-    LockAcquireHelperArgs* args = nullptr;
+
     long timeout = 0;
     instr_time connectionStart;
     INSTR_TIME_SET_CURRENT(connectionStart);
@@ -187,9 +188,9 @@ void LockAcquireHelperMain(Datum main_arg)
     Datum paramValues[1];
 
     pqsignal(SIGTERM, lock_acquire_helper_sigterm);
-#ifdef DISABLE_OG_COMMENTS
+
     BackgroundWorkerUnblockSignals();
-#endif
+
     elog(LOG, "lock acquiring backend started for backend %d (cooldown %dms)", backendPid,
          args->lock_cooldown);
 
@@ -202,10 +203,10 @@ void LockAcquireHelperMain(Datum main_arg)
     do {
         timeout = MillisecondsToTimeout(connectionStart, args->lock_cooldown);
     } while (timeout > 0 && ShouldAcquireLock(timeout));
-#ifdef DISABLE_OG_COMMENTS
+
     /* connecting to the database */
     BackgroundWorkerInitializeConnectionByOid(args->DatabaseId, InvalidOid, 0);
-#endif
+
     /*
      * The query below sends a SIGTERM signal to conflicting backends using
      * pg_terminate_backend() function.
@@ -275,3 +276,4 @@ void LockAcquireHelperMain(Datum main_arg)
     /* safely got to the end, exit without problem */
     proc_exit(0);
 }
+#endif
