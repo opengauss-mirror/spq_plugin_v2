@@ -1103,6 +1103,42 @@ void Session_variables::RegisterSessionVariables()
         &DesiredPercentFreeAfterMove, 10.0, 0.0, 100.0, PGC_SIGHUP, GUC_STANDARD, NULL,
         NULL, NULL);
 
+    DefineCustomBoolVariable(
+        "spq.allow_nested_distributed_execution",
+        gettext_noop("Enables distributed execution within a task "
+                     "of another distributed execution."),
+        gettext_noop("Nested distributed execution can happen when spq "
+                     "pushes down a call to a user-defined function within "
+                     "a distributed query, and the function contains another "
+                     "distributed query. In this scenario, spq makes no "
+                     "guarantess with regards to correctness and it is therefore "
+                     "disallowed by default. This setting can be used to allow "
+                     "nested distributed execution."),
+        &AllowNestedDistributedExecution, false, PGC_USERSET,
+        GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+
+    DefineCustomBoolVariable(
+        "spq.enable_local_reference_table_foreign_keys",
+        gettext_noop("Enables foreign keys from/to local tables"),
+        gettext_noop("When enabled, foreign keys between local tables and reference "
+                     "tables supported."),
+        &EnableLocalReferenceForeignKeys, true, PGC_USERSET, GUC_STANDARD, NULL, NULL,
+        NULL);
+
+    DefineCustomBoolVariable(
+        "spq.enable_manual_changes_to_shards",
+        gettext_noop("Enables dropping and truncating known shards."),
+        gettext_noop("Set to false by default. If set to true, enables "
+                     "dropping and truncating shards on the coordinator "
+                     "(or the workers with metadata)"),
+        &EnableManualChangesToShards, false, PGC_USERSET,
+        GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+
+    DefineCustomBoolVariable(
+        "spq.enable_metadata_sync", gettext_noop("Enables object and metadata syncing."),
+        NULL, &EnableMetadataSync, false, /** @FIXME: should be true */
+        PGC_USERSET, GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
+
     /** @TODO: following parameters should be look more deeply if we really want to make
      them to be configurable parameters */
 #ifdef ENABLE_ALL_CONFIGUARABLE_PARAMETERS
@@ -1134,20 +1170,6 @@ void Session_variables::RegisterSessionVariables()
                      "extra locking and prevents modifications from "
                      "worker nodes."),
         &AllowModificationsFromWorkersToReplicatedTables, true, PGC_USERSET,
-        GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
-
-    DefineCustomBoolVariable(
-        "spq.allow_nested_distributed_execution",
-        gettext_noop("Enables distributed execution within a task "
-                     "of another distributed execution."),
-        gettext_noop("Nested distributed execution can happen when spq "
-                     "pushes down a call to a user-defined function within "
-                     "a distributed query, and the function contains another "
-                     "distributed query. In this scenario, spq makes no "
-                     "guarantess with regards to correctness and it is therefore "
-                     "disallowed by default. This setting can be used to allow "
-                     "nested distributed execution."),
-        &AllowNestedDistributedExecution, false, PGC_USERSET,
         GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
 
     DefineCustomBoolVariable(
@@ -1293,34 +1315,12 @@ void Session_variables::RegisterSessionVariables()
         &MaxRebalancerLoggedIgnoredMoves, 5, -1, INT_MAX, PGC_USERSET,
         GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
 
-    DefineCustomBoolVariable(
-        "spq.enable_local_reference_table_foreign_keys",
-        gettext_noop("Enables foreign keys from/to local tables"),
-        gettext_noop("When enabled, foreign keys between local tables and reference "
-                     "tables supported."),
-        &EnableLocalReferenceForeignKeys, true, PGC_USERSET, GUC_STANDARD, NULL, NULL,
-        NULL);
-
-    DefineCustomBoolVariable(
-        "spq.enable_manual_changes_to_shards",
-        gettext_noop("Enables dropping and truncating known shards."),
-        gettext_noop("Set to false by default. If set to true, enables "
-                     "dropping and truncating shards on the coordinator "
-                     "(or the workers with metadata)"),
-        &EnableManualChangesToShards, false, PGC_USERSET,
-        GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
-
     DefineCustomStringVariable("spq.enable_manual_metadata_changes_for_user",
                                gettext_noop("Enables some helper UDFs to modify metadata "
                                             "for the given user"),
                                NULL, &EnableManualMetadataChangesForUser, "", PGC_SIGHUP,
                                GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
                                NULL, NULL, NULL);
-
-    DefineCustomBoolVariable(
-        "spq.enable_metadata_sync", gettext_noop("Enables object and metadata syncing."),
-        NULL, &EnableMetadataSync, false, /** @FIXME: should be true */
-        PGC_USERSET, GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
 
     DefineCustomBoolVariable(
         "spq.enable_non_colocated_router_query_pushdown",
