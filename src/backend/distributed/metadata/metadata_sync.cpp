@@ -88,7 +88,7 @@
 #include "distributed/worker_manager.h"
 #include "distributed/worker_protocol.h"
 #include "distributed/worker_transaction.h"
-
+#include "distributed/string_utils.h"
 static void EnsureObjectMetadataIsSane(int distributionArgumentIndex, int colocationId);
 static List* GetFunctionDependenciesForObjects(ObjectAddress* objectAddress);
 static char* SchemaOwnerName(Oid objectId);
