@@ -1943,6 +1943,16 @@ static int GsBaseBackup(int argc, char** argv)
         }
     }
 
+    /* Check if host is specified by using -h */
+    if (dbhost == NULL) {
+        fprintf(stderr,
+                _("%s:The specified host is missing, it must be specified by -h "
+                  "parameter.\n"),
+                progname);
+        fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
+        exit(1);
+    }
+
     /*
      * Any non-option arguments?
      */
