@@ -928,4 +928,5 @@ TABLE testnested_table ORDER BY 1;
 
 --RESET client_min_messages;
 SET citus.log_remote_commands TO off;
+SET client_min_messages TO ERROR;
 DROP SCHEMA forcepushdown_schema CASCADE;

@@ -153,10 +153,13 @@ typedef struct ListCellAndListWrapper {
           true);                                                                      \
          var##PositionDoNotUse++)
 
-#define declare_for_each_from size_t i_9527 = 0;
-#define for_each_from(cell, lst, N)                                        \
-    for ((cell) = static_cast<decltype(cell)>(list_head(lst)), i_9527 = 0; \
-         (cell) != NULL && i_9527 >= N; (cell) = lnext(cell), i_9527++)
+#define declare_for_each_from int i_9527 = 0;
+#define for_each_from(cell, lst, N)                                                   \
+    for (i_9527 = (N), (cell) = static_cast<decltype(cell)>(                          \
+                           ((lst) != NIL && i_9527 >= 0 && i_9527 < list_length(lst)) \
+                               ? list_nth_cell((lst), i_9527)                         \
+                               : NULL);                                               \
+         (cell) != NULL; (cell) = lnext(cell), i_9527++)
 
 static inline int list_cell_number(const List* l, const ListCell* c)
 {

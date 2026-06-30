@@ -87,8 +87,12 @@ endif
 override PGCFLAGS := $(shell $(PG_CONFIG) --cflags)
 override OG_THIRD_BIN_PATH := $(shell echo ${THIRD_BIN_PATH})
 override OG_CODE_BASE := $(shell echo ${CODE_BASE})
+override OPENGAUSS_VERSION_NUM := @OPENGAUSS_VERSION_NUM@
 override THIRD_PARTY_INCLUDE := -I '$(OG_THIRD_BIN_PATH)/kernel/dependency/libobs/comm/include' \
 								-I '$(OG_THIRD_BIN_PATH)/kernel/dependency/openssl/comm/include'
+ifeq ($(shell test "$(OPENGAUSS_VERSION_NUM)" -ge 70000 && echo yes),yes)
+override THIRD_PARTY_INCLUDE += -I '$(OG_THIRD_BIN_PATH)/kernel/platform/python3.7/include/python3.7m'
+endif
 override THIRD_PARTY_INCLUDE += -I '$(OG_CODE_BASE)/src/include'
 override THIRD_PARTY_INCLUDE += -I '$(spq_abs_top_srcdir)/vendor/safestringlib/include'
 
@@ -101,7 +105,7 @@ ifneq ($(GIT_VERSION),)
     override CXXFLAGS += -DGIT_VERSION=\"$(GIT_VERSION)\"
 endif
 
-override CPPFLAGS := @CPPFLAGS@ @SPQ_CPPFLAGS@ -I '${spq_abs_top_srcdir}/src/include' -I'${spq_top_builddir}/src/include' $(CPPFLAGS) $(THIRD_PARTY_INCLUDE) -fPIC
+override CPPFLAGS := @CPPFLAGS@ @SPQ_CPPFLAGS@ -I'${spq_top_builddir}/src/include' -I '${spq_abs_top_srcdir}/src/include' $(CPPFLAGS) $(THIRD_PARTY_INCLUDE) -fPIC
 override LDFLAGS += @LDFLAGS@ @SPQ_LDFLAGS@
 
 # optional file with user defined, additional, rules

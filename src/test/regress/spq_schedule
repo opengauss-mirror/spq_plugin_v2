@@ -55,6 +55,7 @@ test: spq_background_rebalance
 test: spq_partition_tables
 
 test: spq_fast_path_router_modify spq_function_with_case_when spq_hyperscale_tutorial spq_foreign_key_restriction_enforcement spq_forcedelegation_functions
+test: spq_bool_expr_qual_pushdown
 test: spq_issue_5099 spq_issue_6543 spq_issue_6592 spq_issue_7477 spq_issue_7705
 test: spq_function_create
 test: spq_functions

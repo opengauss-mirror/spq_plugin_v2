@@ -174,5 +174,7 @@ with q as (
     join information_schema.columns icl on icl.table_name::text = lower(td.table_name) and icl.column_name::text = lower(td.column_name)
 ) select column_name from q order by column_name;
 
+SET client_min_messages TO ERROR;
 DROP SCHEMA subquery_local_tables CASCADE;
+RESET client_min_messages;
 SET search_path TO public;

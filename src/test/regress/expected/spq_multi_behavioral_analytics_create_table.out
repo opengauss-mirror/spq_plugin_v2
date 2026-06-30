@@ -25,9 +25,6 @@ SELECT create_distributed_table('events_table', 'user_id');
 \set events_table_data_file :abs_srcdir'/data/events_table.data'
 \set client_side_copy_command '\\copy users_table FROM ':users_table_data_file' WITH CSV;'
 :client_side_copy_command
-ERROR:  cannot find shard interval
-DETAIL:  Hash of the partition column value does not fall into any shards.
-CONTEXT:  COPY users_table, line 1: "6,2017-11-23 00:09:44.19812,5,2,0,"
 \set client_side_copy_command '\\copy events_table FROM ':events_table_data_file' WITH CSV;'
 :client_side_copy_command
 SET spq.shard_count = 96;
