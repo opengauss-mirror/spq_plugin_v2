@@ -37,6 +37,12 @@ SHLIB_LINK = $(libpq)
 
 include $(spq_top_builddir)/Makefile.global
 
+# Rebuild all objects when the generated build config changes, because these
+# objects are emitted into the source tree and can otherwise silently reuse a
+# stale ABI from a previous openGauss version.
+CONFIG_INVALIDATE := $(spq_top_builddir)/Makefile.global $(spq_top_builddir)/src/include/spq_config.h
+$(OBJS): $(CONFIG_INVALIDATE)
+
 # make sure spq_version.o is recompiled whenever any change is made to the binary or any
 # other artifact being installed to reflect the correct gitref for every build
 SPQ_VERSION_INVALIDATE := $(filter-out utils/spq_version.o,$(OBJS))

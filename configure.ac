@@ -118,6 +118,7 @@ if test "$OPENGAUSS_VERSION_NUM" -gt 0; then
 else
   AC_MSG_RESULT([not openGauss, defaulting to 0])
 fi
+AC_SUBST([OPENGAUSS_VERSION_NUM])
 AC_DEFINE_UNQUOTED([OPENGAUSS_VERSION_NUM], [$OPENGAUSS_VERSION_NUM],
                    [openGauss numeric version (e.g. 70000 for 7.x, 60000 for 6.x; 0 for non-openGauss)])
 

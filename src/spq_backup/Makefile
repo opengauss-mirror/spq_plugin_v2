@@ -15,6 +15,10 @@ subdir = src/spq_backup
 spq_top_builddir = ../..
 include $(spq_top_builddir)/Makefile.global
 
+# spq_backup also changes ABI and include paths across openGauss versions.
+# Force a rebuild when the generated build config changes.
+CONFIG_INVALIDATE := $(spq_top_builddir)/Makefile.global $(spq_top_builddir)/src/include/spq_config.h
+
 override CPPFLAGS := -I$(libpq_srcdir) -I$(ZLIB_INCLUDE_PATH) $(CPPFLAGS) -DHAVE_LIBZ -fPIC -fPIE -DFRONTEND -I$(OG_CODE_BASE)/src/bin/pg_rewind \
 	-I$(OG_CODE_BASE)/src/bin/pg_ctl -I$(LZ4_INCLUDE_PATH) -I$(ZSTD_INCLUDE_PATH) -I${OG_CODE_BASE}/src/lib/page_compression -I${OG_CODE_BASE}/src/include \
 	-I${OG_CODE_BASE}/mppdb_temp_install/include -I${OG_CODE_BASE}/mppdb_temp_install/include/postgresql/internal/
@@ -63,14 +67,14 @@ spq_backup: spq_backup.o $(OBJS)
 xlogreader.cpp: % : $(OG_CODE_BASE)/src/gausskernel/storage/access/transam/%
 	rm -f $@ && $(LN_S) $< .
 
-spq_backup.o: $(spq_top_builddir)/../src/spq_backup/spq_backup.cpp
+spq_backup.o: $(spq_top_builddir)/../src/spq_backup/spq_backup.cpp $(CONFIG_INVALIDATE)
 	$(CC) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-receivelog.o: $(spq_top_builddir)/../src/spq_backup/receivelog.cpp
+receivelog.o: $(spq_top_builddir)/../src/spq_backup/receivelog.cpp $(CONFIG_INVALIDATE)
 	$(CC) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-streamutil.o: $(spq_top_builddir)/../src/spq_backup/streamutil.cpp
+streamutil.o: $(spq_top_builddir)/../src/spq_backup/streamutil.cpp $(CONFIG_INVALIDATE)
 	$(CC) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-xlogreader.o: $(spq_top_builddir)/../src/spq_backup/xlogreader.cpp
+xlogreader.o: $(spq_top_builddir)/../src/spq_backup/xlogreader.cpp $(CONFIG_INVALIDATE)
 	$(CC) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 

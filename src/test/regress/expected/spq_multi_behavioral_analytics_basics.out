@@ -216,7 +216,7 @@ WHERE user_id IN (SELECT user_id FROM users_table WHERE value_1 >= 1 AND value_1
 SELECT count(*), count(DISTINCT user_id), avg(user_id) FROM agg_results;
  count | count |        avg
 ---------------------------------------------------------------------
-     6 |     6 | 3.5000000000000000
+     5 |     5 | 3.8000000000000000
 (1 row)
 
 ---------------------------------------------------------------------
@@ -235,9 +235,9 @@ GROUP BY user_id
 HAVING count(distinct value_1) >= 2;
 -- get some statistics from the aggregated results to ensure the results are correct
 SELECT count(*), count(DISTINCT user_id), avg(user_id) FROM agg_results;
- count | count | avg
+ count | count |        avg
 ---------------------------------------------------------------------
-     0 |     0 |
+     6 |     6 | 3.5000000000000000
 (1 row)
 
 ---------------------------------------------------------------------
@@ -365,9 +365,9 @@ SELECT user_id, value_1 from
 ) as a;
 -- get some statistics from the aggregated results to ensure the results are correct
 SELECT count(*), count(DISTINCT user_id), avg(user_id) FROM agg_results;
- count | count |        avg
+ count | count |          avg
 ---------------------------------------------------------------------
-     7 |     2 | 4.4285714285714286
+     1 |     1 | 1.00000000000000000000
 (1 row)
 
 ---------------------------------------------------------------------

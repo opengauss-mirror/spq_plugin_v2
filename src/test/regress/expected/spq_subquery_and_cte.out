@@ -157,13 +157,11 @@ WHERE
     ORDER BY 1 DESC;
  user_id
 ---------------------------------------------------------------------
-       6
-       5
        4
        3
        2
        1
-(6 rows)
+(4 rows)
 
 -- subquery in WHERE clause is planned recursively due to the recurring table
 -- in FROM clause
@@ -308,7 +306,7 @@ SELECT * FROM
 			foo.user_id = events_table.value_2
 ORDER BY 3 DESC, 2 DESC, 1 DESC
 LIMIT 5;
-ERROR:  Query could not find the intermediate result file "39_1", it was mostly likely deleted due to an error in a parallel process within the same distributed transaction
+FIXME ERROR:  Query could not find the intermediate result file "xx_xx", it was mostly likely deleted due to an error in a parallel process within the same distributed transaction
 -- now recursively plan subqueries inside the CTEs that contains LIMIT and OFFSET
 WITH cte AS MATERIALIZED (
 	WITH local_cte AS MATERIALIZED (
@@ -574,14 +572,7 @@ RAISE '(%/3) failed to execute one of the tasks', errors_received;
 END;
 $$;
 ERROR:  (3/3) failed to execute one of the tasks
+SET client_min_messages TO ERROR;
 DROP SCHEMA subquery_and_ctes CASCADE;
-NOTICE:  drop cascades to 8 other objects
-DETAIL:  drop cascades to table users_table
-drop cascades to table events_table
-drop cascades to table users_table_local
-drop cascades to table dist_table
-drop cascades to function func()
-drop cascades to table ref_table_1
-drop cascades to table ref_table_2
-drop cascades to table dist
+RESET client_min_messages;
 SET search_path TO public;

@@ -648,6 +648,7 @@ LDFLAGS
 CXXFLAGS
 CXX
 vpath_build
+OPENGAUSS_VERSION_NUM
 with_pg_version_check
 PATH
 PG_CONFIG

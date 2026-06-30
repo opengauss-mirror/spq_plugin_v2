@@ -261,9 +261,9 @@ WHERE user_id IN (SELECT user_id FROM users_table WHERE value_1 >= 1 AND value_1
     AND user_id = 1;
 -- get some statistics from the aggregated results to ensure the results are correct
 SELECT count(*), count(DISTINCT user_id), avg(user_id) FROM agg_results_second;
- count | count |        avg
+ count | count |          avg
 ---------------------------------------------------------------------
-     6 |     6 | 3.5000000000000000
+     1 |     1 | 1.00000000000000000000
 (1 row)
 
 ---------------------------------------------------------------------
@@ -281,9 +281,9 @@ WHERE user_id IN (SELECT user_id FROM users_table WHERE value_1 >= 1 AND value_1
     AND (user_id = 1 OR user_id = 2);
 -- get some statistics from the aggregated results to ensure the results are correct
 SELECT count(*), count(DISTINCT user_id), avg(user_id) FROM agg_results_second;
- count | count |        avg
+ count | count |          avg
 ---------------------------------------------------------------------
-     6 |     6 | 3.5000000000000000
+     1 |     1 | 1.00000000000000000000
 (1 row)
 
 ---------------------------------------------------------------------

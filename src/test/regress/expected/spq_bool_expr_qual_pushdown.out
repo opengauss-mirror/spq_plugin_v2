@@ -1,0 +1,49 @@
+CREATE SCHEMA bool_expr_qual_pushdown;
+SET search_path TO bool_expr_qual_pushdown;
+SET spq.next_shard_id TO 31080000;
+SET spq.shard_count TO 2;
+SET spq.shard_replication_factor TO 1;
+CREATE TABLE test_bug2(
+    id INT PRIMARY KEY,
+    a TEXT,
+    b TEXT
+);
+NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "test_bug2_pkey" for table "test_bug2"
+SELECT create_distributed_table('test_bug2', 'id');
+ create_distributed_table
+---------------------------------------------------------------------
+
+(1 row)
+
+INSERT INTO test_bug2 VALUES
+    (1, 'x', '111'),
+    (2, 'x', '222'),
+    (3, 'y', '999');
+SELECT * FROM test_bug2 WHERE a = 'x' AND b = '999' ORDER BY id;
+ id | a | b
+---------------------------------------------------------------------
+(0 rows)
+
+SELECT * FROM test_bug2 WHERE a = 'y' OR b = '222' ORDER BY id;
+ id | a |  b
+---------------------------------------------------------------------
+  2 | x | 222
+  3 | y | 999
+(2 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT * FROM test_bug2 WHERE a = 'x' AND b = '999';
+                          QUERY PLAN
+---------------------------------------------------------------------
+ Spq extensible Adaptive
+   Task Count: 2
+   Tasks Shown: One of 2
+   ->  Task
+         Node: host=localhost port=xxxxx dbname=regression
+         ->  Seq Scan on test_bug2_31080000 test_bug2
+               Filter: ((a = 'x'::text) AND (b = '999'::text))
+(7 rows)
+
+DROP SCHEMA bool_expr_qual_pushdown CASCADE;
+NOTICE:  drop cascades to table test_bug2
+RESET all;

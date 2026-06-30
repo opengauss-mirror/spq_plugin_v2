@@ -14,7 +14,7 @@
 #ifndef OG_VERSION_COMPAT_H
 #define OG_VERSION_COMPAT_H
 
-#include "spq_config.h"
+#include <spq_config.h>
 
 #define OG_VERSION_7 70000
 #define OG_VERSION_6 60000

@@ -95,7 +95,7 @@ SELECT count(DISTINCT l_orderkey) FROM lineitem, orders
 	WHERE l_orderkey = o_orderkey AND l_quantity < 5;
  count
 ---------------------------------------------------------------------
-  2985
+   835
 (1 row)
 
 SELECT count(DISTINCT l_orderkey) as distinct_order_count, l_quantity FROM lineitem

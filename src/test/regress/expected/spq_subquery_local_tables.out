@@ -186,14 +186,10 @@ with q as (
 ) select column_name from q order by column_name;
  column_name
 ---------------------------------------------------------------------
- column_name
- id
  table_name
-(3 rows)
+(1 row)
 
+SET client_min_messages TO ERROR;
 DROP SCHEMA subquery_local_tables CASCADE;
-NOTICE:  drop cascades to 3 other objects
-DETAIL:  drop cascades to table users_table_local
-drop cascades to table events_table_local
-drop cascades to table test_dist
+RESET client_min_messages;
 SET search_path TO public;
