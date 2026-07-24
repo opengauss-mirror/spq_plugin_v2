@@ -957,14 +957,14 @@ void CitusBackgroundTaskQueueMonitorMain(const BgWorkerContext* bwc)
     gs_signal_setmask(&t_thrd.libpq_cxt.BlockSig, NULL);
 
     /* handle SIGTERM to properly terminate active task executors */
-    pqsignal(SIGTERM, QueueMonitorSigTermHandler);
+    gspqsignal(SIGTERM, QueueMonitorSigTermHandler);
 
     /* handle SIGINT to properly cancel active task executors */
-    pqsignal(SIGINT, QueueMonitorSigIntHandler);
+    gspqsignal(SIGINT, QueueMonitorSigIntHandler);
 
     /* handle SIGHUP to update MaxBackgroundTaskExecutors and
      * MaxBackgroundTaskExecutorsPerNode */
-    pqsignal(SIGHUP, QueueMonitorSigHupHandler);
+    gspqsignal(SIGHUP, QueueMonitorSigHupHandler);
 
     gs_signal_setmask(&t_thrd.libpq_cxt.UnBlockSig, NULL);
 
