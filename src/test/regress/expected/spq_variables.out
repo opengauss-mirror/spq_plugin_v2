@@ -7,6 +7,7 @@ SHOW spq.version;
 SELECT name,setting FROM pg_settings WHERE name like 'spq.%';
                      name                      |     setting
 ---------------------------------------------------------------------
+ spq.bm25_global_stat_cache_ttl                | 3600
  spq.cluster_name                              | default
  spq.coordinator_aggregation_strategy          | row-gather
  spq.desired_percent_disk_available_after_move | 10
@@ -43,6 +44,42 @@ SELECT name,setting FROM pg_settings WHERE name like 'spq.%';
  spq.stat_statements_track                     | none
  spq.use_secondary_nodes                       | never
  spq.version                                   | 2.0.0
-(36 rows)
+(37 rows)
+
+SHOW spq.bm25_global_stat_cache_ttl;
+ spq.bm25_global_stat_cache_ttl
+--------------------------------
+ 1h
+(1 row)
+
+ALTER SYSTEM SET spq.bm25_global_stat_cache_ttl = '120s';
+ALTER SYSTEM SET
+SELECT pg_reload_conf();
+ pg_reload_conf
+----------------
+ t
+(1 row)
+
+\c regression
+SHOW spq.bm25_global_stat_cache_ttl;
+ spq.bm25_global_stat_cache_ttl
+--------------------------------
+ 2min
+(1 row)
+
+ALTER SYSTEM SET spq.bm25_global_stat_cache_ttl = '3600s';
+ALTER SYSTEM SET
+SELECT pg_reload_conf();
+ pg_reload_conf
+----------------
+ t
+(1 row)
+
+\c regression
+SHOW spq.bm25_global_stat_cache_ttl;
+ spq.bm25_global_stat_cache_ttl
+--------------------------------
+ 1h
+(1 row)
 
 --add more variables testcases for spq's variables

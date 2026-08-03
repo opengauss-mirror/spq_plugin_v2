@@ -39,6 +39,7 @@ test: spq_run_local_command
 
 # vector basic testcases:
 test: spq_btree spq_hnsw_sparsevec spq_hnsw_bit spq_hnsw_vector spq_ivfflat_vector spq_ivfflat_bit spq_deadlock
+test: spq_bm25_global_idf
 test: spq_metadata
 
 # this testcase must be seperated
