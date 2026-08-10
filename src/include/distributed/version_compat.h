@@ -12,11 +12,13 @@
 #define VERSION_COMPAT_H
 
 #include "postgres.h"
+#include "spq_config.h"
 
 #include "access/heapam.h"
 #include "access/sdir.h"
 #include "catalog/namespace.h"
 #include "commands/explain.h"
+#include "commands/sequence.h"
 #include "executor/tuptable.h"
 #include "nodes/parsenodes.h"
 #include "optimizer/planner.h"
@@ -32,6 +34,15 @@ typedef struct {
     File fd;
     off_t offset;
 } FileCompat;
+
+static inline int128 NextvalInternalCompat(Oid sequenceId)
+{
+#if OPENGAUSS_VERSION_NUM < 70000
+    return nextval_internal(sequenceId);
+#else
+    return nextval_internal(sequenceId, true);
+#endif
+}
 
 static inline int FileWriteCompat(FileCompat* file, char* buffer, int amount,
                                   uint32 wait_event_info)
