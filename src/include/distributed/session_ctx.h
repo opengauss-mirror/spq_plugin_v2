@@ -67,7 +67,7 @@
 #endif
 #endif
 
-extern char* NodeConninfo;
+extern THR_LOCAL char* NodeConninfo;
 
 struct Session_variables {
     /* controls use of locks to enforce safe commutativity */

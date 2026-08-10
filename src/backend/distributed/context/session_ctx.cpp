@@ -425,24 +425,7 @@ void GlobalROVariables::NodeConninfoGucAssignHook(const char* newval, void* extr
         return;
     }
 
-    PQconninfoOption* optionArray = PQconninfoParse(newval, NULL);
-    if (optionArray == NULL) {
-        ereport(FATAL, (errmsg("cannot parse node_conninfo value"),
-                        errdetail("The GUC check hook should prevent "
-                                  "all malformed values.")));
-    }
-
-    ResetConnParams();
-
-    for (PQconninfoOption* option = optionArray; option->keyword != NULL; option++) {
-        if (option->val == NULL || option->val[0] == '\0') {
-            continue;
-        }
-
-        AddConnParam(option->keyword, option->val);
-    }
-
-    PQconninfoFree(optionArray);
+    SetConnParams(newval);
 }
 
 bool GlobalROVariables::ReadOnlyIntCheckHook(int* newval, void** extra, GucSource source)

@@ -159,6 +159,16 @@ List* ActivePrimaryNodeList(LOCKMODE lockMode)
 }
 
 /*
+ * ActivePrimaryNodeListForRead returns all active primary nodes for a read-only
+ * operation. Unlike ActivePrimaryNodeList, it does not require the local node
+ * to accept modifications.
+ */
+List* ActivePrimaryNodeListForRead(LOCKMODE lockMode)
+{
+    return FilterActiveNodeListFunc(lockMode, NodeIsPrimary);
+}
+
+/*
  * ActivePrimaryRemoteNodeList returns a list of all active primary nodes in
  * workerNodeHash.
  */

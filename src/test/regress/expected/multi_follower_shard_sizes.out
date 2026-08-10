@@ -1,0 +1,56 @@
+\c - - - :master_port
+SELECT spq_add_node('localhost', :worker_1_port) > 0;
+ ?column?
+---------------------------------------------------------------------
+ t
+(1 row)
+
+SELECT spq_add_node('localhost', :worker_2_port) > 0;
+ ?column?
+---------------------------------------------------------------------
+ t
+(1 row)
+
+CREATE TABLE follower_shard_sizes_test (
+    distribution_key integer,
+    payload text
+);
+SELECT create_distributed_table('follower_shard_sizes_test', 'distribution_key');
+ create_distributed_table
+---------------------------------------------------------------------
+
+(1 row)
+
+INSERT INTO follower_shard_sizes_test VALUES (1, 'follower-read');
+\c - - - :follower_master_port
+SELECT pg_is_in_recovery();
+ pg_is_in_recovery
+---------------------------------------------------------------------
+ t
+(1 row)
+
+SELECT count(*) > 0 AS has_test_shard_sizes
+FROM pg_catalog.spq_shard_sizes() shard_sizes
+JOIN pg_dist_shard shards
+  ON shards.shardid = shard_sizes.shard_id
+WHERE shards.logicalrelid = 'follower_shard_sizes_test'::regclass
+  AND shard_sizes.size > 0;
+ has_test_shard_sizes
+---------------------------------------------------------------------
+ t
+(1 row)
+
+\c - - - :master_port
+DROP TABLE follower_shard_sizes_test;
+SELECT spq_remove_node('localhost', :worker_1_port);
+ spq_remove_node
+---------------------------------------------------------------------
+
+(1 row)
+
+SELECT spq_remove_node('localhost', :worker_2_port);
+ spq_remove_node
+---------------------------------------------------------------------
+
+(1 row)
+
