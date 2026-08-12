@@ -82,7 +82,7 @@ void ThreadContext::CreateParamsCache()
 void ThreadContext::FreeConnParamsHashEntryFields(ConnParamsElem* elem)
 {
     if (elem->keywords != NULL) {
-        char** keyword = &elem->keywords[elem->runtimeParamStart];
+        char** keyword = elem->keywords;
         while (*keyword != NULL) {
             pfree(*keyword);
             keyword++;
@@ -92,7 +92,7 @@ void ThreadContext::FreeConnParamsHashEntryFields(ConnParamsElem* elem)
     }
 
     if (elem->values != NULL) {
-        char** value = &elem->values[elem->runtimeParamStart];
+        char** value = elem->values;
         while (*value != NULL) {
             pfree(*value);
             value++;
@@ -102,6 +102,7 @@ void ThreadContext::FreeConnParamsHashEntryFields(ConnParamsElem* elem)
     }
 
     elem->runtimeParamStart = 0;
+    elem->generation = 0;
 }
 
 void ThreadContext::InvalidateParamsCache()
@@ -131,13 +132,18 @@ ConnParamsElem* ThreadContext::FindOrCreateConnParams(ConnectionHashKey* key)
     /* search our cache for precomputed connection settings */
     ConnParamsElem* elem =
         (ConnParamsElem*)hash_search(m_connParamsHash, key, HASH_ENTER, &found);
+    if (found && elem->generation != GetConnParamsGeneration()) {
+        FreeConnParamsHashEntryFields(elem);
+        found = false;
+    }
+
     if (!found) {
         memset(((char*)elem) + sizeof(ConnectionHashKey), 0,
                sizeof(ConnParamsElem) - sizeof(ConnectionHashKey));
 
         /* if not found or not valid, compute them from GUC, runtime, etc. */
         GetConnParams(key, &elem->keywords, &elem->values, &elem->runtimeParamStart,
-                      m_mem);
+                      &elem->generation, m_mem);
     }
 
     return elem;

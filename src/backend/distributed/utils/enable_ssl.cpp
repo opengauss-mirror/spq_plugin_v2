@@ -197,14 +197,7 @@ static void GloballyReloadConfig()
  */
 static bool ShouldUseAutoSSL(void)
 {
-    const char* sslmode = NULL;
-    sslmode = GetConnParam("sslmode");
-
-    if (sslmode != NULL && strcmp(sslmode, "require") == 0) {
-        return true;
-    }
-
-    return false;
+    return ConnParamEquals("sslmode", "require");
 }
 
 /*

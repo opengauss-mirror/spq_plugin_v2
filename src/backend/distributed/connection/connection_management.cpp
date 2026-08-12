@@ -173,6 +173,10 @@ void SessionConnCtx::InitializeConnCtx()
  */
 void InvalidateConnParamsHashEntries(void)
 {
+    if (Spq::ThdCtx == nullptr) {
+        return;
+    }
+
     Spq::ThdCtx->InvalidateParamsCache();
 }
 
@@ -435,12 +439,17 @@ MultiConnection* StartNodeUserDatabaseConnection(uint32 flags, const char* hostn
 static MultiConnection* FindAvailableConnection(dlist_head* connections, uint32 flags)
 {
     List* metadataConnectionCandidateList = NIL;
+    uint64 currentConnParamsGeneration = GetConnParamsGeneration();
 
     dlist_iter iter;
     dlist_foreach(iter, connections)
     {
         MultiConnection* connection =
             dlist_container(MultiConnection, connectionNode, iter.cur);
+
+        if (connection->connParamsGeneration != currentConnParamsGeneration) {
+            connection->forceCloseAtTransactionEnd = true;
+        }
 
         if (flags & OUTSIDE_TRANSACTION) {
             /* don't return connections that are used in transactions */
@@ -1189,6 +1198,7 @@ static void StartConnectionEstablishment(MultiConnection* connection,
     strlcpy(connection->database, key->database, NAMEDATALEN);
     strlcpy(connection->user, key->user, NAMEDATALEN);
     connection->requiresReplication = key->replicationConnParam;
+    connection->connParamsGeneration = entry->generation;
 
     connection->pgConn = PQconnectStartParams((const char**)entry->keywords,
                                               (const char**)entry->values, false);

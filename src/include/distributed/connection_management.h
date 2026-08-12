@@ -175,6 +175,9 @@ typedef struct MultiConnection {
     /* connection id */
     uint64 connectionId;
 
+    /* connection parameter snapshot used to establish this connection */
+    uint64 connParamsGeneration;
+
     /* state of the connection */
     MultiConnectionState connectionState;
 
@@ -278,12 +281,13 @@ extern void AfterXactConnectionHandling(bool isCommit);
 
 extern char* GetAuthinfo(char* hostname, int32 port, char* user);
 extern void InitConnParams(void);
-extern void ResetConnParams(void);
 extern void InvalidateConnParamsHashEntries(void);
-extern void AddConnParam(const char* keyword, const char* value);
+extern void SetConnParams(const char* conninfo);
 extern void GetConnParams(ConnectionHashKey* key, char*** keywords, char*** values,
-                          Index* runtimeParamStart, MemoryContext context);
-extern const char* GetConnParam(const char* keyword);
+                          Index* runtimeParamStart, uint64* generation,
+                          MemoryContext context);
+extern uint64 GetConnParamsGeneration(void);
+extern bool ConnParamEquals(const char* keyword, const char* expectedValue);
 extern bool CheckConninfo(const char* conninfo, const char** allowedConninfoKeywords,
                           Size allowedConninfoKeywordsLength, char** errmsg);
 

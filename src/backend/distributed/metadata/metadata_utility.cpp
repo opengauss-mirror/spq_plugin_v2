@@ -108,6 +108,9 @@ static char* GetSizeQueryBySizeQueryType(SizeQueryType sizeQueryType);
 static char* GenerateAllShardStatisticsQueryForNode(WorkerNode* workerNode,
                                                     List* citusTableIds);
 static List* GenerateShardStatisticsQueryList(List* workerNodeList, List* citusTableIds);
+static List* SendShardStatisticsQueriesToWorkerNodes(List* workerNodeList,
+                                                     List* citusTableIds,
+                                                     bool useDistributedTransaction);
 static void ErrorIfNotSuitableToGetSize(Oid relationId);
 static List* OpenConnectionToNodes(List* workerNodeList);
 static void ReceiveShardIdAndSizeResults(List* connectionList,
@@ -265,8 +268,9 @@ Datum spq_shard_sizes(PG_FUNCTION_ARGS)
     /* we don't need a distributed transaction here */
     bool useDistributedTransaction = false;
 
-    List* connectionList =
-        SendShardStatisticsQueriesInParallel(allCitusTableIds, useDistributedTransaction);
+    List* workerNodeList = ActivePrimaryNodeListForRead(NoLock);
+    List* connectionList = SendShardStatisticsQueriesToWorkerNodes(
+        workerNodeList, allCitusTableIds, useDistributedTransaction);
 
     TupleDesc tupleDescriptor = NULL;
     Tuplestorestate* tupleStore = SetupTuplestore(fcinfo, &tupleDescriptor);
@@ -350,6 +354,18 @@ List* SendShardStatisticsQueriesInParallel(List* citusTableIds,
 {
     List* workerNodeList = ActivePrimaryNodeList(NoLock);
 
+    return SendShardStatisticsQueriesToWorkerNodes(workerNodeList, citusTableIds,
+                                                   useDistributedTransaction);
+}
+
+/*
+ * SendShardStatisticsQueriesToWorkerNodes sends shard statistics queries to
+ * the supplied worker nodes and returns the corresponding connections.
+ */
+static List* SendShardStatisticsQueriesToWorkerNodes(List* workerNodeList,
+                                                     List* citusTableIds,
+                                                     bool useDistributedTransaction)
+{
     List* shardSizesQueryList =
         GenerateShardStatisticsQueryList(workerNodeList, citusTableIds);
 

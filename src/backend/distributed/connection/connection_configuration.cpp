@@ -24,87 +24,156 @@
 #include "distributed/session_ctx.h"
 #include "distributed/worker_manager.h"
 
-char* NodeConninfo = "sslmode=disable";
+THR_LOCAL char* NodeConninfo = "sslmode=disable";
 
-/* represents a list of libpq parameter settings */
+/* represents an immutable snapshot of libpq parameter settings */
 typedef struct ConnParamsInfo {
     char** keywords; /* libpq keywords */
     char** values;   /* desired values for above */
     Size size;       /* current used size of arrays */
     Size maxSize;    /* maximum allocated size of arrays (similar to e.g. StringInfo) */
+    uint64 generation;
 } ConnParamsInfo;
 
 static ConnParamsInfo ConnParams;
+static pthread_mutex_t ConnParamsLock = PTHREAD_MUTEX_INITIALIZER;
+static pg_atomic_uint64 ConnParamsGeneration = 0;
 
 static Size CalculateMaxSize(void);
+static ConnParamsInfo BuildConnParams(const char* conninfo);
+static void FreeConnParams(ConnParamsInfo* connParams);
+static void AddConnParam(ConnParamsInfo* connParams, const char* keyword,
+                         const char* value);
 static int uri_prefix_length(const char* connstr);
 
 /*
- * InitConnParams initializes the ConnParams field to point to enough memory to
- * store settings for every valid libpq value, though these regions are set to
- * zeros from the outset and the size appropriately also set to zero.
- *
- * This function must be called before others in this file, though calling it
- * after use of the initialized ConnParams structure will result in any
- * populated parameter settings being lost.
+ * InitConnParams initializes the global snapshot from the current GUC value.
+ * The master thread calls this before session threads can consume it.
  */
 void InitConnParams()
 {
-    Size maxSize = CalculateMaxSize();
-    ConnParamsInfo connParams = {.keywords = (char**)malloc(maxSize * sizeof(char*)),
-                                 .values = (char**)malloc(maxSize * sizeof(char*)),
-                                 .size = 0,
-                                 .maxSize = maxSize};
+    pthread_mutex_lock(&ConnParamsLock);
 
-    memset(connParams.keywords, 0, maxSize * sizeof(char*));
-    memset(connParams.values, 0, maxSize * sizeof(char*));
+    if (ConnParams.keywords != NULL) {
+        pthread_mutex_unlock(&ConnParamsLock);
+        return;
+    }
 
-    ConnParams = connParams;
+    pthread_mutex_unlock(&ConnParamsLock);
+
+    ConnParamsInfo connParams = BuildConnParams(NodeConninfo);
+
+    pthread_mutex_lock(&ConnParamsLock);
+    if (ConnParams.keywords == NULL) {
+        uint64 generation = pg_atomic_read_u64(&ConnParamsGeneration);
+        if (generation == 0) {
+            generation = 1;
+            pg_atomic_write_u64(&ConnParamsGeneration, generation);
+        }
+
+        connParams.generation = generation;
+        ConnParams = connParams;
+        memset(&connParams, 0, sizeof(ConnParamsInfo));
+    }
+    pthread_mutex_unlock(&ConnParamsLock);
+
+    FreeConnParams(&connParams);
 }
 
 /*
- * ResetConnParams frees all strings in the keywords and parameters arrays,
- * sets their elements to null, and resets the ConnParamsSize to zero before
- * adding back any hardcoded global connection settings (at present, there
- * are no).
+ * SetConnParams builds a complete replacement before taking the lock, then
+ * swaps it atomically with the shared immutable snapshot.
  */
-void ResetConnParams()
+void SetConnParams(const char* conninfo)
 {
-    for (Size paramIdx = 0; paramIdx < ConnParams.size; paramIdx++) {
-        free((void*)ConnParams.keywords[paramIdx]);
-        free((void*)ConnParams.values[paramIdx]);
+    ConnParamsInfo newConnParams = BuildConnParams(conninfo);
+    ConnParamsInfo oldConnParams;
 
-        ConnParams.keywords[paramIdx] = ConnParams.values[paramIdx] = NULL;
-    }
+    pthread_mutex_lock(&ConnParamsLock);
+    newConnParams.generation = pg_atomic_read_u64(&ConnParamsGeneration) + 1;
+    oldConnParams = ConnParams;
+    ConnParams = newConnParams;
+    pg_atomic_write_u64(&ConnParamsGeneration, newConnParams.generation);
+    pthread_mutex_unlock(&ConnParamsLock);
 
-    ConnParams.size = 0;
-
+    FreeConnParams(&oldConnParams);
     InvalidateConnParamsHashEntries();
 }
 
-/*
- * AddConnParam adds a parameter setting to the global libpq settings according
- * to the provided keyword and value.
- */
-void AddConnParam(const char* keyword, const char* value)
+static ConnParamsInfo BuildConnParams(const char* conninfo)
 {
-    auto& connParams = ConnParams;
+    Size maxSize = CalculateMaxSize();
+    ConnParamsInfo connParams = {.keywords = (char**)calloc(maxSize, sizeof(char*)),
+                                 .values = (char**)calloc(maxSize, sizeof(char*)),
+                                 .size = 0,
+                                 .maxSize = maxSize,
+                                 .generation = 0};
 
-    if (connParams.size + 1 >= connParams.maxSize) {
-        /* hopefully this error is only seen by developers */
+    if (connParams.keywords == NULL || connParams.values == NULL) {
+        FreeConnParams(&connParams);
+        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("out of memory")));
+    }
+
+    PQconninfoOption* optionArray = PQconninfoParse(conninfo, NULL);
+    if (optionArray == NULL) {
+        FreeConnParams(&connParams);
+        ereport(FATAL, (errmsg("cannot parse node_conninfo value"),
+                        errdetail("The GUC check hook should prevent "
+                                  "all malformed values.")));
+    }
+
+    for (PQconninfoOption* option = optionArray; option->keyword != NULL; option++) {
+        if (option->val == NULL || option->val[0] == '\0') {
+            continue;
+        }
+
+        AddConnParam(&connParams, option->keyword, option->val);
+    }
+
+    PQconninfoFree(optionArray);
+    return connParams;
+}
+
+static void FreeConnParams(ConnParamsInfo* connParams)
+{
+    if (connParams->keywords != NULL) {
+        for (Size paramIndex = 0; paramIndex < connParams->size; paramIndex++) {
+            free(connParams->keywords[paramIndex]);
+        }
+        free(connParams->keywords);
+    }
+
+    if (connParams->values != NULL) {
+        for (Size paramIndex = 0; paramIndex < connParams->size; paramIndex++) {
+            free(connParams->values[paramIndex]);
+        }
+        free(connParams->values);
+    }
+
+    memset(connParams, 0, sizeof(ConnParamsInfo));
+}
+
+static void AddConnParam(ConnParamsInfo* connParams, const char* keyword,
+                         const char* value)
+{
+    if (connParams->size + 1 >= connParams->maxSize) {
+        FreeConnParams(connParams);
         ereport(ERROR, (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
                         errmsg("ConnParams arrays bound check failed")));
     }
 
-    /*
-     * Don't use pstrdup here to avoid being tied to a memory context, we free
-     * these later using ResetConnParams
-     */
-    connParams.keywords[connParams.size] = strdup(keyword);
-    connParams.values[connParams.size] = strdup(value);
-    connParams.size++;
+    char* keywordCopy = strdup(keyword);
+    char* valueCopy = strdup(value);
+    if (keywordCopy == NULL || valueCopy == NULL) {
+        free(keywordCopy);
+        free(valueCopy);
+        FreeConnParams(connParams);
+        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("out of memory")));
+    }
 
-    connParams.keywords[connParams.size] = connParams.values[connParams.size] = NULL;
+    connParams->keywords[connParams->size] = keywordCopy;
+    connParams->values[connParams->size] = valueCopy;
+    connParams->size++;
 }
 
 /*
@@ -205,7 +274,7 @@ bool CheckConninfo(const char* conninfo, const char** allowedConninfoKeywords,
  * into an appropriate context later.
  */
 void GetConnParams(ConnectionHashKey* key, char*** keywords, char*** values,
-                   Index* runtimeParamStart, MemoryContext context)
+                   Index* runtimeParamStart, uint64* generation, MemoryContext context)
 {
     /*
      * make space for the port as a string: sign, 10 digits, NUL. We keep it on the stack
@@ -239,12 +308,58 @@ void GetConnParams(ConnectionHashKey* key, char*** keywords, char*** values,
      * method requires it.
      */
     bool gotHostParamFromGlobalParams = false;
-    auto& connParams = ConnParams;
-    for (Size paramIndex = 0; paramIndex < connParams.size; paramIndex++) {
-        if (strcmp(connParams.keywords[paramIndex], "host") == 0) {
-            gotHostParamFromGlobalParams = true;
-            break;
+    Size maxConnParams = CalculateMaxSize();
+    char** connKeywords = *keywords =
+        (char**)MemoryContextAllocZero(context, maxConnParams * sizeof(char*));
+    char** connValues = *values =
+        (char**)MemoryContextAllocZero(context, maxConnParams * sizeof(char*));
+    Size globalParamCount = 0;
+
+    {
+        pthread_mutex_lock(&ConnParamsLock);
+
+        globalParamCount = ConnParams.size;
+        *generation = ConnParams.generation;
+
+        for (Size paramIndex = 0; paramIndex < globalParamCount; paramIndex++) {
+            Size keywordLength = strlen(ConnParams.keywords[paramIndex]) + 1;
+            Size valueLength = strlen(ConnParams.values[paramIndex]) + 1;
+
+            connKeywords[paramIndex] = (char*)MemoryContextAllocExtended(
+                context, keywordLength, MCXT_ALLOC_NO_OOM);
+            connValues[paramIndex] = (char*)MemoryContextAllocExtended(
+                context, valueLength, MCXT_ALLOC_NO_OOM);
+
+            if (connKeywords[paramIndex] == NULL || connValues[paramIndex] == NULL) {
+                pthread_mutex_unlock(&ConnParamsLock);
+
+                for (Size copiedParamIndex = 0; copiedParamIndex <= paramIndex;
+                     copiedParamIndex++) {
+                    if (connKeywords[copiedParamIndex] != NULL) {
+                        pfree(connKeywords[copiedParamIndex]);
+                    }
+                    if (connValues[copiedParamIndex] != NULL) {
+                        pfree(connValues[copiedParamIndex]);
+                    }
+                }
+                pfree(connKeywords);
+                pfree(connValues);
+                *keywords = NULL;
+                *values = NULL;
+
+                ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("out of memory")));
+            }
+
+            memcpy(connKeywords[paramIndex], ConnParams.keywords[paramIndex],
+                   keywordLength);
+            memcpy(connValues[paramIndex], ConnParams.values[paramIndex], valueLength);
+
+            if (strcmp(ConnParams.keywords[paramIndex], "host") == 0) {
+                gotHostParamFromGlobalParams = true;
+            }
         }
+
+        pthread_mutex_unlock(&ConnParamsLock);
     }
 
     const char* runtimeKeywords[] = {gotHostParamFromGlobalParams ? "hostaddr" : "host",
@@ -264,27 +379,12 @@ void GetConnParams(ConnectionHashKey* key, char*** keywords, char*** values,
      * point should be allocated in context and will be freed upon
      * FreeConnParamsHashEntryFields
      */
-    *runtimeParamStart = connParams.size;
-
-    /*
-     * Declare local params for readability;
-     *
-     * assignment is done directly to not lose the pointers if any of the later
-     * allocations cause an error. FreeConnParamsHashEntryFields knows about the
-     * possibility of half initialized keywords or values and correctly reclaims them when
-     * the cache is reused.
-     *
-     * Need to zero enough space for all possible libpq parameters.
-     */
-    char** connKeywords = *keywords =
-        (char**)MemoryContextAllocZero(context, connParams.maxSize * sizeof(char*));
-    char** connValues = *values =
-        (char**)MemoryContextAllocZero(context, connParams.maxSize * sizeof(char*));
+    *runtimeParamStart = globalParamCount;
 
     /* auth keywords will begin after global and runtime ones are appended */
-    Index authParamsIdx = connParams.size + lengthof(runtimeKeywords);
+    Index authParamsIdx = globalParamCount + lengthof(runtimeKeywords);
 
-    if (connParams.size + lengthof(runtimeKeywords) >= connParams.maxSize) {
+    if (globalParamCount + lengthof(runtimeKeywords) >= maxConnParams) {
         /* hopefully this error is only seen by developers */
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                         errmsg("too many connParams entries")));
@@ -292,20 +392,13 @@ void GetConnParams(ConnectionHashKey* key, char*** keywords, char*** values,
 
     pg_ltoa(effectiveKey->port, nodePortString); /* populate node port string with port */
 
-    /* first step: copy global parameters to beginning of array */
-    for (Size paramIndex = 0; paramIndex < connParams.size; paramIndex++) {
-        /* copy the keyword&value pointers to the new array */
-        connKeywords[paramIndex] = connParams.keywords[paramIndex];
-        connValues[paramIndex] = connParams.values[paramIndex];
-    }
-
-    /* second step: begin after global params and copy runtime params into our context */
+    /* append runtime parameters after the copied global parameters */
     for (Index runtimeParamIndex = 0; runtimeParamIndex < lengthof(runtimeKeywords);
          runtimeParamIndex++) {
         /* copy the keyword & value into our context and append to the new array */
-        connKeywords[connParams.size + runtimeParamIndex] =
+        connKeywords[globalParamCount + runtimeParamIndex] =
             MemoryContextStrdup(context, runtimeKeywords[runtimeParamIndex]);
-        connValues[connParams.size + runtimeParamIndex] =
+        connValues[globalParamCount + runtimeParamIndex] =
             MemoryContextStrdup(context, runtimeValues[runtimeParamIndex]);
     }
 
@@ -369,20 +462,28 @@ void GetConnParams(ConnectionHashKey* key, char*** keywords, char*** values,
 }
 
 /*
- * GetConnParam finds the keyword in the configured connection parameters and returns its
- * value.
+ * ConnParamEquals compares a configured connection parameter while holding the
+ * snapshot lock, without exposing shared string storage to callers.
  */
-const char* GetConnParam(const char* keyword)
+bool ConnParamEquals(const char* keyword, const char* expectedValue)
 {
-    auto& connParams = ConnParams;
+    bool matches = false;
+    pthread_mutex_lock(&ConnParamsLock);
 
-    for (Size i = 0; i < connParams.size; i++) {
-        if (strcmp(keyword, connParams.keywords[i]) == 0) {
-            return connParams.values[i];
+    for (Size paramIndex = 0; paramIndex < ConnParams.size; paramIndex++) {
+        if (strcmp(keyword, ConnParams.keywords[paramIndex]) == 0) {
+            matches = strcmp(ConnParams.values[paramIndex], expectedValue) == 0;
+            break;
         }
     }
 
-    return NULL;
+    pthread_mutex_unlock(&ConnParamsLock);
+    return matches;
+}
+
+uint64 GetConnParamsGeneration(void)
+{
+    return pg_atomic_read_u64(&ConnParamsGeneration);
 }
 
 /*

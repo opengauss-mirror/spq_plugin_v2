@@ -285,7 +285,7 @@ sub revert_replace_postgres
 
 sub generate_hba
 {
-    my $nodename = shift;
+    my ($nodename, $replicationUser) = @_;
 
     open(my $fh, ">", catfile($TMP_CHECKDIR, $nodename, "data", "pg_hba.conf"))
         or die "could not open pg_hba.conf";
@@ -294,9 +294,25 @@ sub generate_hba
     print $fh "host all         alice,bob ::1/128      md5\n";
     print $fh "host all         all       127.0.0.1/32 trust\n";
     print $fh "host all         all       ::1/128      trust\n";
-    print $fh "host replication postgres  127.0.0.1/32 trust\n";
-    print $fh "host replication postgres  ::1/128      trust\n";
+    print $fh "host replication $replicationUser,postgres 127.0.0.1/32 trust\n";
+    print $fh "host replication $replicationUser,postgres ::1/128      trust\n";
     close $fh;
+}
+
+sub write_open_gauss_replication_config
+{
+    my ($dataPath, $localHaPort, $remoteHaPort, $applicationName) = @_;
+    my @replicationOptions = (
+        "replconninfo1='localhost=127.0.0.1 localport=$localHaPort " .
+        "localheartbeatport=" . ($localHaPort + 100) . " " .
+        "localservice=" . ($localHaPort + 200) . " remotehost=127.0.0.1 " .
+        "remoteport=$remoteHaPort remoteheartbeatport=" . ($remoteHaPort + 100) . " " .
+        "remoteservice=" . ($remoteHaPort + 200) . "'",
+        "application_name='$applicationName'"
+    );
+
+    write_settings_to_postgres_conf(
+        \@replicationOptions, catfile($dataPath, "postgresql.conf"));
 }
 
 # always want to call initdb under normal postgres, so revert from a
@@ -503,13 +519,9 @@ else
 
 if ($followercluster)
 {
-    # follower clusters don't work well when automatically generating certificates as the
-    # followers do not execute the extension creation sql scripts that trigger the creation
-    # of certificates
-    push(@pgOptions, "spq.node_conninfo='sslmode=prefer'");
     push(@pgOptions, "max_wal_senders=10");
     push(@pgOptions, "hot_standby=on");
-    push(@pgOptions, "wal_level='replica'");
+    push(@pgOptions, "wal_level='hot_standby'");
 }
 
 
@@ -671,12 +683,28 @@ if (!$conninfo)
 	    catfile($TMP_CHECKDIR, $MASTERDIR, "data"))) == 0
         or die "Could not create $MASTERDIR data directory";
 
-    generate_hba("master");
+    generate_hba("master", $user);
 
     for my $port (@workerPorts)
     {
 	system("cp", ("-a", catfile($TMP_CHECKDIR, $MASTERDIR, "data"), catfile($TMP_CHECKDIR, "worker.$port", "data"))) == 0
 	    or die "Could not create worker data directory";
+    }
+
+    if ($followercluster)
+    {
+        system("cp", ("-a", catfile($TMP_CHECKDIR, $MASTERDIR, "data"),
+                       catfile($TMP_CHECKDIR, $MASTER_FOLLOWERDIR, "data"))) == 0
+            or die "Could not create coordinator follower data directory";
+
+        for my $offset (0 .. $#workerPorts)
+        {
+            my $workerPort = $workerPorts[$offset];
+            my $followerPort = $followerWorkerPorts[$offset];
+            system("cp", ("-a", catfile($TMP_CHECKDIR, "worker.$workerPort", "data"),
+                           catfile($TMP_CHECKDIR, "follower.$followerPort", "data"))) == 0
+                or die "Could not create worker follower data directory";
+        }
     }
 }
 
@@ -751,12 +779,22 @@ if ($followercluster)
     $synchronousReplication = "-c synchronous_standby_names='FIRST 1 (*)' -c synchronous_commit=remote_apply";
 }
 
+my @primaryModeArgs = $followercluster ? ('-M', 'primary') : ();
+my @followerModeArgs = $followercluster ? ('-M', 'standby') : ();
+
 # Start servers
 if (!$conninfo)
 {
     write_settings_to_postgres_conf(\@pgOptions, catfile($TMP_CHECKDIR, $MASTERDIR, "data/postgresql.conf"));
+    if ($followercluster)
+    {
+        write_open_gauss_replication_config(
+            catfile($TMP_CHECKDIR, $MASTERDIR, "data"), $masterPort + 6000,
+            $followerCoordPort + 50000, "spq_primary_coordinator");
+    }
+
     if(system(catfile("$bindir", "gs_ctl"),
-        (@gs_ctl_args, 'start', '-w',
+        (@gs_ctl_args, 'start', '-w', @primaryModeArgs,
          '-o', " -c port=$masterPort $synchronousReplication",
          '-D', catfile($TMP_CHECKDIR, $MASTERDIR, 'data'),
 	 '-l', catfile($TMP_CHECKDIR, $MASTERDIR, 'log', 'postmaster.log'))) != 0)
@@ -765,11 +803,20 @@ if (!$conninfo)
         die "Could not start master server";
     }
 
-    for my $port (@workerPorts)
+    for my $offset (0 .. $#workerPorts)
     {
+        my $port = $workerPorts[$offset];
         write_settings_to_postgres_conf(\@pgOptions, catfile($TMP_CHECKDIR, "worker.$port", "data/postgresql.conf"));
+        if ($followercluster)
+        {
+            my $followerPort = $followerWorkerPorts[$offset];
+            write_open_gauss_replication_config(
+                catfile($TMP_CHECKDIR, "worker.$port", "data"), $port + 6000,
+                $followerPort + 50000, "spq_primary_worker_$offset");
+        }
+
         if(system(catfile("$bindir", "gs_ctl"),
-            (@gs_ctl_args, 'start', '-w',
+            (@gs_ctl_args, 'start', '-w', @primaryModeArgs,
                 '-o', " -c port=$port $synchronousReplication",
                 '-D', catfile($TMP_CHECKDIR, "worker.$port", "data"),
                 '-l', catfile($TMP_CHECKDIR, "worker.$port", "log", "postmaster.log"))) != 0)
@@ -783,24 +830,14 @@ if (!$conninfo)
 # Setup the follower nodes
 if ($followercluster)
 {
-    system(catfile("$bindir", "pg_basebackup"),
-           ("-D", catfile($TMP_CHECKDIR, $MASTER_FOLLOWERDIR, "data"), "--host=$host", "--port=$masterPort",
-            "--username=$user", "-R", "-X", "stream", "--no-sync")) == 0
-      or die 'could not take basebackup';
-
-    for my $offset (0 .. $#workerPorts)
-    {
-        my $workerPort = $workerPorts[$offset];
-        my $followerPort = $followerWorkerPorts[$offset];
-        system(catfile("$bindir", "pg_basebackup"),
-               ("-D", catfile($TMP_CHECKDIR, "follower.$followerPort", "data"), "--host=$host", "--port=$workerPort",
-                "--username=$user", "-R", "-X", "stream")) == 0
-            or die "Could not take basebackup";
-    }
-
     write_settings_to_postgres_conf(\@pgOptions, catfile($TMP_CHECKDIR, $MASTER_FOLLOWERDIR, "data/postgresql.conf"));
+    write_open_gauss_replication_config(
+        catfile($TMP_CHECKDIR, $MASTER_FOLLOWERDIR, "data"),
+        $followerCoordPort + 50000, $masterPort + 6000,
+        "spq_follower_coordinator");
+
     if(system(catfile("$bindir", "gs_ctl"),
-           (@gs_ctl_args, 'start', '-w',
+           (@gs_ctl_args, 'start', '-w', @followerModeArgs,
             '-o', " -c port=$followerCoordPort",
            '-D', catfile($TMP_CHECKDIR, $MASTER_FOLLOWERDIR, 'data'), '-l', catfile($TMP_CHECKDIR, $MASTER_FOLLOWERDIR, 'log', 'postmaster.log'))) != 0)
     {
@@ -808,11 +845,17 @@ if ($followercluster)
         die "Could not start master follower server";
     }
 
-    for my $port (@followerWorkerPorts)
+    for my $offset (0 .. $#followerWorkerPorts)
     {
+        my $port = $followerWorkerPorts[$offset];
         write_settings_to_postgres_conf(\@pgOptions, catfile($TMP_CHECKDIR, "follower.$port", "data/postgresql.conf"));
+        my $workerPort = $workerPorts[$offset];
+        write_open_gauss_replication_config(
+            catfile($TMP_CHECKDIR, "follower.$port", "data"), $port + 50000,
+            $workerPort + 6000, "spq_follower_worker_$offset");
+
         if(system(catfile("$bindir", "gs_ctl"),
-               (@gs_ctl_args, 'start', '-w',
+               (@gs_ctl_args, 'start', '-w', @followerModeArgs,
                 '-o', " -c port=$port",
                 '-D', catfile($TMP_CHECKDIR, "follower.$port", "data"),
                 '-l', catfile($TMP_CHECKDIR, "follower.$port", "log", "postmaster.log"))) != 0)

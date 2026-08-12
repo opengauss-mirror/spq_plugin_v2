@@ -31,6 +31,7 @@ namespace Spq {
 struct ConnParamsElem {
     ConnectionHashKey key;
     Index runtimeParamStart;
+    uint64 generation;
     char** keywords;
     char** values;
 };

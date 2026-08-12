@@ -243,6 +243,10 @@ check-follower-cluster: all
 	$(pg_regress_multi_check) --load-extension=spq --follower-cluster \
 	-- $(MULTI_REGRESS_OPTS) --schedule=$(spq_abs_srcdir)/multi_follower_schedule $(EXTRA_TESTS)
 
+check-follower-shard-sizes: all
+	$(pg_regress_multi_check) --load-extension=spq --follower-cluster \
+	-- $(MULTI_REGRESS_OPTS) --schedule=$(spq_abs_srcdir)/follower_shard_sizes_schedule
+
 check-operations: all
 	$(pg_regress_multi_check) --load-extension=spq  --worker-count=6 \
 	-- $(MULTI_REGRESS_OPTS) --schedule=$(spq_abs_srcdir)/operations_schedule $(EXTRA_TESTS)
