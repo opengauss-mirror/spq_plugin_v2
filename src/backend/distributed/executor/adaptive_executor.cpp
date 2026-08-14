@@ -581,6 +581,9 @@ typedef struct TaskPlacementExecution {
      */
     uint32 queryIndex;
 
+    /* number of BM25 SET LOCAL command results still preceding the task result */
+    uint32 bm25PrefixResultsRemaining;
+
     /* worker pool on which the placement needs to be executed */
     WorkerPool* workerPool;
 
@@ -1337,6 +1340,7 @@ static void AssignTasksToConnectionsOrWorkerPool(DistributedExecution* execution
             placementExecution->workerPool = workerPool;
             placementExecution->placementExecutionIndex = placementExecutionIndex;
             placementExecution->queryIndex = 0;
+            placementExecution->bm25PrefixResultsRemaining = 0;
             INSTR_TIME_SET_ZERO(placementExecution->startTime);
             INSTR_TIME_SET_ZERO(placementExecution->endTime);
 
@@ -1488,7 +1492,8 @@ static void SetAttributeInputMetadata(DistributedExecution* execution,
         TupleDesc tupleDescriptor = tupleDest->tupleDescForQuery(tupleDest, queryIndex);
         if (tupleDescriptor == NULL) {
             attInMetadata = NULL;
-        } else if (Session_ctx::Vars().EnableBinaryProtocol &&
+        } else if (GetBm25GlobalStatQueryPrefix() == NULL &&
+                   Session_ctx::Vars().EnableBinaryProtocol &&
                    CanUseBinaryCopyFormat(tupleDescriptor)) {
             attInMetadata = TupleDescGetAttBinaryInMetadata(tupleDescriptor);
             shardCommandExecution->binaryResults = true;
@@ -3504,8 +3509,19 @@ static bool SendNextQuery(TaskPlacementExecution* placementExecution,
 
     Assert(queryIndex < task->queryCount);
     char* queryString = TaskQueryStringAtIndex(task, queryIndex);
+    StringInfoData bm25Query;
+    const char* bm25QueryPrefix = GetBm25GlobalStatQueryPrefix();
+    bool hasUnresolvedParameters =
+        paramListInfo != NULL && !task->parametersInQueryStringResolved;
+    bool hasBm25QueryPrefix = bm25QueryPrefix != NULL && !hasUnresolvedParameters;
+    if (hasBm25QueryPrefix) {
+        initStringInfo(&bm25Query);
+        appendStringInfo(&bm25Query, "%s%s", bm25QueryPrefix, queryString);
+        queryString = bm25Query.data;
+        placementExecution->bm25PrefixResultsRemaining = 2;
+    }
 
-    if (paramListInfo != NULL && !task->parametersInQueryStringResolved) {
+    if (hasUnresolvedParameters) {
         int parameterCount = paramListInfo->numParams;
         Oid* parameterTypes = NULL;
         const char** parameterValues = NULL;
@@ -3540,8 +3556,15 @@ static bool SendNextQuery(TaskPlacementExecution* placementExecution,
     }
 
     if (querySent == 0) {
+        if (hasBm25QueryPrefix) {
+            pfree(bm25Query.data);
+        }
         connection->connectionState = MULTI_CONNECTION_LOST;
         return false;
+    }
+
+    if (hasBm25QueryPrefix) {
+        pfree(bm25Query.data);
     }
 
     int singleRowMode = PQsetSingleRowMode(connection->pgConn);
@@ -3593,6 +3616,12 @@ static bool ReceiveResults(WorkerSession* session, bool storeRows)
 
         ExecStatusType resultStatus = PQresultStatus(result);
         if (resultStatus == PGRES_COMMAND_OK) {
+            if (placementExecution->bm25PrefixResultsRemaining > 0) {
+                placementExecution->bm25PrefixResultsRemaining--;
+                PQclear(result);
+                continue;
+            }
+
             char* currentAffectedTupleString = PQcmdTuples(result);
             int64 currentAffectedTupleCount = 0;
 

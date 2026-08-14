@@ -165,6 +165,7 @@ CREATE EVENT TRIGGER spq_cascade_to_partition
 #include "udfs/run_command_on_workers/2.0.0.sql"
 #include "udfs/spq_run_local_command/2.0.0.sql"
 #include "udfs/run_command_on_all_nodes/2.0.0.sql"
+#include "udfs/bm25_collect_global_stat/2.0.0.sql"
 
 -------------------------  function aggs for multi-shard agg -------------------------
 #include "udfs/any_value/2.0.0.sql"

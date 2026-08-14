@@ -54,6 +54,7 @@
 
 #include "distributed/adaptive_executor.h"
 #include "distributed/backend_data.h"
+#include "distributed/bm25_global_stat_cache.h"
 #include "distributed/background_jobs.h"
 #include "distributed/citus_depended_object.h"
 #include "distributed/citus_nodefuncs.h"
@@ -263,6 +264,7 @@ void _PG_init(void)
     InitializeBackendManagement();
     InitializeSpqQueryStats();
     InitializeSharedConnectionStats();
+    InitializeBm25GlobalStatCache();
 
     /* enable modification of pg_catalog tables during pg_upgrade */
     if (u_sess->proc_cxt.IsBinaryUpgrade) {

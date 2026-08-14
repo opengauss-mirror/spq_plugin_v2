@@ -59,6 +59,9 @@ typedef struct TransactionProperties {
 
 extern void CitusExecutorStart(QueryDesc* queryDesc, int eflags);
 extern void CitusExecutorRun(QueryDesc* queryDesc, ScanDirection direction, long count);
+extern void TryCollectBm25GlobalStat(QueryDesc* queryDesc);
+extern void ResetBm25GlobalStatQueryPrefix(void);
+extern const char* GetBm25GlobalStatQueryPrefix(void);
 extern void AdaptiveExecutorPreExecutorRun(CitusScanState* scanState);
 extern TupleTableSlot* AdaptiveExecutor(CitusScanState* scanState);
 

@@ -242,6 +242,14 @@ void CitusExecutorStart(QueryDesc* queryDesc, int eflags)
     }
 
     /*
+     * Distributed BM25 global IDF: collect cluster-wide stats and inject them as
+     * SET LOCAL GUCs before the worker queries are shipped (no-op for EXPLAIN).
+     */
+    if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0) {
+        TryCollectBm25GlobalStat(queryDesc);
+    }
+
+    /*
      * We cannot modify XactReadOnly on Windows because it is not
      * declared with PGDLLIMPORT.
      */
@@ -366,6 +374,9 @@ void CitusExecutorRun(QueryDesc* queryDesc, ScanDirection direction, long count)
 
         Session_ctx::ExecCtx().executorBoundParams = savedBoundParams;
         Session_ctx::ExecCtx().ExecutorLevel--;
+        if (Session_ctx::ExecCtx().ExecutorLevel == 0) {
+            ResetBm25GlobalStatQueryPrefix();
+        }
 
         if (Session_ctx::ExecCtx().ExecutorLevel == 0 &&
             Session_ctx::PlanCtx().PlannerLevel == 0) {
@@ -395,6 +406,9 @@ void CitusExecutorRun(QueryDesc* queryDesc, ScanDirection direction, long count)
 
         Session_ctx::ExecCtx().executorBoundParams = savedBoundParams;
         Session_ctx::ExecCtx().ExecutorLevel--;
+        if (Session_ctx::ExecCtx().ExecutorLevel == 0) {
+            ResetBm25GlobalStatQueryPrefix();
+        }
 
         if (Session_ctx::ExecCtx().ExecutorLevel == 0 &&
             Session_ctx::PlanCtx().PlannerLevel == 0) {
