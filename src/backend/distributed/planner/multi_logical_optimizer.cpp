@@ -152,6 +152,7 @@ typedef struct OrderByLimitReference {
     bool hasOrderByAggregate;
     bool canApproximate;
     bool hasDistinctOn;
+    bool hasOrderByBm25Operator;
 } OrderByLimitReference;
 
 /* Local functions forward declarations */
@@ -289,6 +290,7 @@ static List* WorkerSortClauseList(Node* limitCount, List* groupClauseList,
                                   List* sortClauseList,
                                   OrderByLimitReference orderByLimitReference);
 static bool CanPushDownLimitApproximate(List* sortClauseList, List* targetList);
+static bool HasOrderByBm25Operator(List* sortClauseList, List* targetList);
 static bool HasOrderByAggregate(List* sortClauseList, List* targetList);
 static bool HasOrderByNonCommutativeAggregate(List* sortClauseList, List* targetList);
 static bool HasOrderByComplexExpression(List* sortClauseList, List* targetList);
@@ -2506,6 +2508,8 @@ static OrderByLimitReference BuildOrderByLimitReference(
         CanPushDownLimitApproximate(sortClauseList, targetList);
     limitOrderByReference.hasOrderByAggregate =
         HasOrderByAggregate(sortClauseList, targetList);
+    limitOrderByReference.hasOrderByBm25Operator =
+        HasOrderByBm25Operator(sortClauseList, targetList);
 
     return limitOrderByReference;
 }
@@ -4251,8 +4255,14 @@ static List* WorkerSortClauseList(Node* limitCount, List* groupClauseList,
 {
     List* workerSortClauseList = NIL;
 
-    /* if no limit node and no hasDistinctOn, no need to push down sort clauses */
-    if (limitCount == NULL && !orderByLimitReference.hasDistinctOn) {
+    /*
+     * If no limit node and no hasDistinctOn, there is normally no need to push
+     * down sort clauses. Sorting by a BM25 <&> score is the exception: workers
+     * can compute that expression only through a BM25 index scan, and their
+     * planner considers this scan only when the worker query keeps the ORDER BY.
+     */
+    if (limitCount == NULL && !orderByLimitReference.hasDistinctOn &&
+        !orderByLimitReference.hasOrderByBm25Operator) {
         return NIL;
     }
 
@@ -4315,6 +4325,33 @@ static bool CanPushDownLimitApproximate(List* sortClauseList, List* targetList)
     }
 
     return canApproximate;
+}
+
+/* <&> BM25 ordering operator OID (kernel builtin, see pg_operator) */
+#define BM25_ORDER_BY_OP_OID 6208
+
+/*
+ * HasOrderByBm25Operator walks over the given order by clauses, and checks if
+ * any of them sorts by a BM25 <&> score expression. If one does, the function
+ * returns true.
+ */
+static bool HasOrderByBm25Operator(List* sortClauseList, List* targetList)
+{
+    bool hasOrderByBm25Operator = false;
+
+    SortGroupClause* sortClause = NULL;
+    foreach_declared_ptr(sortClause, sortClauseList)
+    {
+        Node* sortExpression = get_sortgroupclause_expr(sortClause, targetList);
+
+        if (IsA(sortExpression, OpExpr) &&
+            ((OpExpr*)sortExpression)->opno == BM25_ORDER_BY_OP_OID) {
+            hasOrderByBm25Operator = true;
+            break;
+        }
+    }
+
+    return hasOrderByBm25Operator;
 }
 
 /*
