@@ -242,42 +242,58 @@ void CitusExecutorStart(QueryDesc* queryDesc, int eflags)
     }
 
     /*
+     * ExecutorStart can fail before ExecutorRun clears the query-scoped prefix.
+     * Always start with an empty prefix so a failed statement cannot contaminate
+     * the next distributed query.
+     */
+    ResetBm25GlobalStatQueryPrefix();
+
+    /*
      * Distributed BM25 global IDF: collect cluster-wide stats and inject them as
      * SET LOCAL GUCs before the worker queries are shipped (no-op for EXPLAIN).
      */
-    if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0) {
-        TryCollectBm25GlobalStat(queryDesc);
-    }
-
-    /*
-     * We cannot modify XactReadOnly on Windows because it is not
-     * declared with PGDLLIMPORT.
-     */
-#ifndef WIN32
-    if (RecoveryInProgress() && Session_ctx::Vars().WritableStandbyCoordinator &&
-        IsCitusPlan(plannedStmt->planTree)) {
-        PG_TRY();
-        {
-            /*
-             * To enable writes from a hot standby we cheat our way through
-             * the checks in standard_ExecutorStart by temporarily setting
-             * XactReadOnly to false.
-             */
-            u_sess->attr.attr_common.XactReadOnly = false;
-            standard_ExecutorStart(queryDesc, eflags);
-            u_sess->attr.attr_common.XactReadOnly = true;
-        }
-        PG_CATCH();
-        {
-            u_sess->attr.attr_common.XactReadOnly = true;
-            PG_RE_THROW();
-        }
-        PG_END_TRY();
-    } else
-#endif
+    PG_TRY();
     {
-        standard_ExecutorStart(queryDesc, eflags);
+        if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0) {
+            TryCollectBm25GlobalStat(queryDesc);
+        }
+
+        /*
+         * We cannot modify XactReadOnly on Windows because it is not
+         * declared with PGDLLIMPORT.
+         */
+#ifndef WIN32
+        if (RecoveryInProgress() && Session_ctx::Vars().WritableStandbyCoordinator &&
+            IsCitusPlan(plannedStmt->planTree)) {
+            PG_TRY();
+            {
+                /*
+                 * To enable writes from a hot standby we cheat our way through
+                 * the checks in standard_ExecutorStart by temporarily setting
+                 * XactReadOnly to false.
+                 */
+                u_sess->attr.attr_common.XactReadOnly = false;
+                standard_ExecutorStart(queryDesc, eflags);
+                u_sess->attr.attr_common.XactReadOnly = true;
+            }
+            PG_CATCH();
+            {
+                u_sess->attr.attr_common.XactReadOnly = true;
+                PG_RE_THROW();
+            }
+            PG_END_TRY();
+        } else
+#endif
+        {
+            standard_ExecutorStart(queryDesc, eflags);
+        }
     }
+    PG_CATCH();
+    {
+        ResetBm25GlobalStatQueryPrefix();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
 }
 
 /*

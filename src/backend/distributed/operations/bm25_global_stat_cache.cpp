@@ -6,56 +6,58 @@
 #include "postgres.h"
 
 #include "access/hash.h"
-#include "executor/executor.h"
 #include "knl/knl_instance.h"
 #include "lib/stringinfo.h"
-#include "utils/hsearch.h"
+#include "storage/barrier.h"
+#include "utils/atomic.h"
 #include "utils/timestamp.h"
 
 #include "distributed/bm25_global_stat_cache.h"
 
-/*
- * BM25 statistics are approximate by nature. A one-minute TTL keeps repeated searches
- * cheap while bounding staleness after regular writes. The cache is deliberately small:
- * every entry is query-term-specific and a miss can safely use local IDF.
- */
-static const int BM25_GLOBAL_STAT_CACHE_MAX_ENTRIES = 1024;
-static const int64 BM25_GLOBAL_STAT_CACHE_TTL_US = 60 * USECS_PER_SEC;
-static const int BM25_GLOBAL_STAT_VALUE_LEN = 65536;
+static const uint32 BM25_TERM_CACHE_BUCKET_COUNT = 16384;
+static const uint32 BM25_STAT_CACHE_BUCKET_COUNT = 256;
+static const uint32 BM25_CACHE_ASSOCIATIVITY = 4;
 
-typedef struct Bm25GlobalStatCacheKey {
+int Bm25GlobalStatCacheTtlSeconds = 3600;
+
+typedef struct Bm25GlobalStatKey {
     Oid databaseOid;
     Oid relationOid;
-    uint64 queryLength;
-    uint32 queryHash;
-    uint32 reverseQueryHash;
-} Bm25GlobalStatCacheKey;
+    AttrNumber columnAttnum;
+} Bm25GlobalStatKey;
 
-typedef struct Bm25GlobalStatCacheEntry {
-    Bm25GlobalStatCacheKey key;
+typedef struct Bm25GlobalStatEntry {
+    pg_atomic_uint64 version;
+    Bm25GlobalStatKey key;
+    uint64 documentCount;
+    uint64 tokenCount;
     TimestampTz updatedAt;
-    bool refreshing;
-    char stat[BM25_GLOBAL_STAT_VALUE_LEN];
-} Bm25GlobalStatCacheEntry;
+} Bm25GlobalStatEntry;
 
-static HTAB* g_bm25GlobalStatCache = NULL;
-static pthread_rwlock_t g_bm25GlobalStatCacheLock;
+typedef struct Bm25GlobalTermEntry {
+    pg_atomic_uint64 version;
+    Bm25GlobalStatKey key;
+    uint32 termHash;
+    uint64 documentFrequency;
+    TimestampTz updatedAt;
+    char term[BM25_GLOBAL_STAT_TERM_LEN];
+} Bm25GlobalTermEntry;
+
+static Bm25GlobalStatEntry* g_bm25GlobalStatCache = NULL;
+static Bm25GlobalTermEntry* g_bm25GlobalTermCache = NULL;
 static pthread_once_t g_bm25GlobalStatCacheOnce = PTHREAD_ONCE_INIT;
 
 static void Bm25GlobalStatCacheInitializeOnce(void)
 {
-    HASHCTL ctl;
-    errno_t rc = memset_s(&ctl, sizeof(ctl), 0, sizeof(ctl));
-    securec_check(rc, "\0", "\0");
-    ctl.keysize = sizeof(Bm25GlobalStatCacheKey);
-    ctl.entrysize = sizeof(Bm25GlobalStatCacheEntry);
-    ctl.hash = tag_hash;
-    ctl.hcxt = INSTANCE_GET_MEM_CXT_GROUP(MEMORY_CONTEXT_STORAGE);
-    ctl.dsize = ctl.max_dsize = hash_select_dirsize(BM25_GLOBAL_STAT_CACHE_MAX_ENTRIES);
-    g_bm25GlobalStatCache =
-        hash_create("SPQ BM25 global statistics", BM25_GLOBAL_STAT_CACHE_MAX_ENTRIES,
-                    &ctl, HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT | HASH_DIRSIZE);
-    PthreadRwLockInit(&g_bm25GlobalStatCacheLock, NULL);
+    MemoryContext cacheContext = INSTANCE_GET_MEM_CXT_GROUP(MEMORY_CONTEXT_STORAGE);
+    MemoryContext oldContext = MemoryContextSwitchTo(cacheContext);
+    g_bm25GlobalStatCache = static_cast<Bm25GlobalStatEntry*>(
+        palloc0(BM25_STAT_CACHE_BUCKET_COUNT * BM25_CACHE_ASSOCIATIVITY *
+                sizeof(Bm25GlobalStatEntry)));
+    g_bm25GlobalTermCache = static_cast<Bm25GlobalTermEntry*>(
+        palloc0(BM25_TERM_CACHE_BUCKET_COUNT * BM25_CACHE_ASSOCIATIVITY *
+                sizeof(Bm25GlobalTermEntry)));
+    MemoryContextSwitchTo(oldContext);
 }
 
 void InitializeBm25GlobalStatCache(void)
@@ -67,153 +69,285 @@ void InitializeBm25GlobalStatCache(void)
     }
 }
 
-static Bm25GlobalStatCacheKey Bm25GlobalStatCacheMakeKey(Oid databaseOid, Oid relationOid,
-                                                         const char* queryText)
+static uint32 Bm25GlobalStatKeyHash(const Bm25GlobalStatKey* key)
 {
-    Bm25GlobalStatCacheKey key;
-    errno_t rc = memset_s(&key, sizeof(key), 0, sizeof(key));
-    securec_check(rc, "\0", "\0");
-    key.databaseOid = databaseOid;
-    key.relationOid = relationOid;
-    key.queryLength = strlen(queryText);
-    key.queryHash =
-        hash_any(reinterpret_cast<const unsigned char*>(queryText), key.queryLength);
-    StringInfoData reversed;
-    initStringInfo(&reversed);
-    enlargeStringInfo(&reversed, key.queryLength);
-    for (int64 index = (int64)key.queryLength - 1; index >= 0; --index) {
-        appendStringInfoCharMacro(&reversed, queryText[index]);
-    }
-    key.reverseQueryHash =
-        hash_any(reinterpret_cast<const unsigned char*>(reversed.data), reversed.len);
-    pfree(reversed.data);
-    return key;
+    return hash_any(reinterpret_cast<const unsigned char*>(key), sizeof(*key));
 }
 
-static Bm25GlobalStatCacheEntry* Bm25GlobalStatCacheOldestEntry(void)
+static bool Bm25GlobalStatKeyEquals(const Bm25GlobalStatKey* left,
+                                    const Bm25GlobalStatKey* right)
 {
-    HASH_SEQ_STATUS status;
-    hash_seq_init(&status, g_bm25GlobalStatCache);
-    Bm25GlobalStatCacheEntry* oldest = NULL;
-    Bm25GlobalStatCacheEntry* entry = NULL;
-    while ((entry = static_cast<Bm25GlobalStatCacheEntry*>(hash_seq_search(&status))) !=
-           NULL) {
-        if (!entry->refreshing &&
-            (oldest == NULL || entry->updatedAt < oldest->updatedAt)) {
+    return left->databaseOid == right->databaseOid &&
+           left->relationOid == right->relationOid &&
+           left->columnAttnum == right->columnAttnum;
+}
+
+template <typename Entry>
+static bool Bm25CacheReadStable(const Entry* source, Entry* snapshot)
+{
+    uint64 before = pg_atomic_barrier_read_u64(
+        const_cast<pg_atomic_uint64*>(&source->version));
+    if (before == 0 || (before & 1) != 0) {
+        return false;
+    }
+    errno_t rc = memcpy_s(snapshot, sizeof(*snapshot), source, sizeof(*source));
+    securec_check(rc, "\0", "\0");
+    pg_read_barrier();
+    uint64 after = pg_atomic_barrier_read_u64(
+        const_cast<pg_atomic_uint64*>(&source->version));
+    return before == after && (after & 1) == 0;
+}
+
+template <typename Entry>
+static bool Bm25CacheTryWrite(Entry* target, const Entry* value)
+{
+    uint64 version = pg_atomic_barrier_read_u64(&target->version);
+    if ((version & 1) != 0 ||
+        !pg_atomic_compare_exchange_u64(&target->version, &version, version + 1)) {
+        return false;
+    }
+    errno_t rc = memcpy_s(reinterpret_cast<char*>(target) + sizeof(target->version),
+                          sizeof(*target) - sizeof(target->version),
+                          reinterpret_cast<const char*>(value) + sizeof(value->version),
+                          sizeof(*value) - sizeof(value->version));
+    securec_check(rc, "\0", "\0");
+    pg_write_barrier();
+    pg_atomic_write_u64(&target->version, version + 2);
+    return true;
+}
+
+static bool Bm25GlobalStatCacheRead(const Bm25GlobalStatKey* key,
+                                    TimestampTz now, uint64* documentCount,
+                                    uint64* tokenCount)
+{
+    uint32 bucket = Bm25GlobalStatKeyHash(key) & (BM25_STAT_CACHE_BUCKET_COUNT - 1);
+    int64 ttl = static_cast<int64>(Bm25GlobalStatCacheTtlSeconds) * USECS_PER_SEC;
+    for (uint32 way = 0; way < BM25_CACHE_ASSOCIATIVITY; ++way) {
+        Bm25GlobalStatEntry snapshot;
+        Bm25GlobalStatEntry* entry =
+            &g_bm25GlobalStatCache[bucket * BM25_CACHE_ASSOCIATIVITY + way];
+        if (Bm25CacheReadStable(entry, &snapshot) &&
+            Bm25GlobalStatKeyEquals(&snapshot.key, key) &&
+            snapshot.documentCount > 0 && snapshot.tokenCount >= snapshot.documentCount &&
+            now - snapshot.updatedAt <= ttl) {
+            *documentCount = snapshot.documentCount;
+            *tokenCount = snapshot.tokenCount;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool Bm25GlobalTermCacheRead(const Bm25GlobalStatKey* key, const char* term,
+                                    TimestampTz now, uint64* documentFrequency)
+{
+    uint32 termHash = hash_any(reinterpret_cast<const unsigned char*>(term), strlen(term));
+    uint32 bucket = (Bm25GlobalStatKeyHash(key) ^ termHash) &
+                    (BM25_TERM_CACHE_BUCKET_COUNT - 1);
+    int64 ttl = static_cast<int64>(Bm25GlobalStatCacheTtlSeconds) * USECS_PER_SEC;
+    for (uint32 way = 0; way < BM25_CACHE_ASSOCIATIVITY; ++way) {
+        Bm25GlobalTermEntry snapshot;
+        Bm25GlobalTermEntry* entry =
+            &g_bm25GlobalTermCache[bucket * BM25_CACHE_ASSOCIATIVITY + way];
+        if (Bm25CacheReadStable(entry, &snapshot) &&
+            snapshot.termHash == termHash &&
+            Bm25GlobalStatKeyEquals(&snapshot.key, key) &&
+            strncmp(snapshot.term, term, sizeof(snapshot.term)) == 0 &&
+            snapshot.documentFrequency > 0 &&
+            now - snapshot.updatedAt <= ttl) {
+            *documentFrequency = snapshot.documentFrequency;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Bm25GlobalStatCacheLookup(Oid databaseOid, Oid relationOid,
+                               AttrNumber columnAttnum,
+                               const char* const* terms, int termCount,
+                               char** statOut)
+{
+    InitializeBm25GlobalStatCache();
+    *statOut = NULL;
+    if (terms == NULL || termCount <= 0) {
+        return false;
+    }
+
+    Bm25GlobalStatKey key = {databaseOid, relationOid, columnAttnum};
+    TimestampTz now = GetCurrentTimestamp();
+    uint64 documentCount = 0;
+    uint64 tokenCount = 0;
+    if (!Bm25GlobalStatCacheRead(&key, now, &documentCount, &tokenCount)) {
+        return false;
+    }
+
+    StringInfoData stat;
+    initStringInfo(&stat);
+    appendStringInfo(&stat, "N=%lu;T=%lu;", (unsigned long)documentCount,
+                     (unsigned long)tokenCount);
+    for (int index = 0; index < termCount; ++index) {
+        uint64 documentFrequency = 0;
+        if (!Bm25GlobalTermCacheRead(&key, terms[index], now, &documentFrequency)) {
+            pfree(stat.data);
+            return false;
+        }
+        if (documentFrequency > documentCount || documentFrequency > UINT_MAX) {
+            pfree(stat.data);
+            return false;
+        }
+        appendStringInfo(&stat, "%s%s:%lu", index == 0 ? "" : ",", terms[index],
+                         (unsigned long)documentFrequency);
+    }
+    *statOut = stat.data;
+    return true;
+}
+
+static Bm25GlobalStatEntry* Bm25GlobalStatCacheChooseSlot(
+    const Bm25GlobalStatKey* key)
+{
+    uint32 bucket = Bm25GlobalStatKeyHash(key) & (BM25_STAT_CACHE_BUCKET_COUNT - 1);
+    Bm25GlobalStatEntry* oldest = NULL;
+    TimestampTz oldestUpdatedAt = PG_INT64_MAX;
+    for (uint32 way = 0; way < BM25_CACHE_ASSOCIATIVITY; ++way) {
+        Bm25GlobalStatEntry snapshot;
+        Bm25GlobalStatEntry* entry =
+            &g_bm25GlobalStatCache[bucket * BM25_CACHE_ASSOCIATIVITY + way];
+        if (!Bm25CacheReadStable(entry, &snapshot)) {
+            if (pg_atomic_barrier_read_u64(&entry->version) == 0) {
+                return entry;
+            }
+            continue;
+        }
+        if (Bm25GlobalStatKeyEquals(&snapshot.key, key)) {
+            return entry;
+        }
+        if (snapshot.updatedAt < oldestUpdatedAt) {
             oldest = entry;
+            oldestUpdatedAt = snapshot.updatedAt;
         }
     }
     return oldest;
 }
 
-Bm25GlobalStatCacheResult Bm25GlobalStatCacheLookup(Oid databaseOid, Oid relationOid,
-                                                    const char* queryText, char** statOut)
+static Bm25GlobalTermEntry* Bm25GlobalTermCacheChooseSlot(
+    const Bm25GlobalStatKey* key, const char* term, uint32 termHash)
+{
+    uint32 bucket = (Bm25GlobalStatKeyHash(key) ^ termHash) &
+                    (BM25_TERM_CACHE_BUCKET_COUNT - 1);
+    Bm25GlobalTermEntry* oldest = NULL;
+    TimestampTz oldestUpdatedAt = PG_INT64_MAX;
+    for (uint32 way = 0; way < BM25_CACHE_ASSOCIATIVITY; ++way) {
+        Bm25GlobalTermEntry snapshot;
+        Bm25GlobalTermEntry* entry =
+            &g_bm25GlobalTermCache[bucket * BM25_CACHE_ASSOCIATIVITY + way];
+        if (!Bm25CacheReadStable(entry, &snapshot)) {
+            if (pg_atomic_barrier_read_u64(&entry->version) == 0) {
+                return entry;
+            }
+            continue;
+        }
+        if (snapshot.termHash == termHash &&
+            Bm25GlobalStatKeyEquals(&snapshot.key, key) &&
+            strncmp(snapshot.term, term, sizeof(snapshot.term)) == 0) {
+            return entry;
+        }
+        if (snapshot.updatedAt < oldestUpdatedAt) {
+            oldest = entry;
+            oldestUpdatedAt = snapshot.updatedAt;
+        }
+    }
+    return oldest;
+}
+
+static bool Bm25GlobalStatParseUnsigned(const char* value, uint64* parsed)
+{
+    if (value == NULL || value[0] == '\0') {
+        return false;
+    }
+    for (const char* cursor = value; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9') {
+            return false;
+        }
+    }
+    errno = 0;
+    char* end = NULL;
+    unsigned long long number = strtoull(value, &end, 10);
+    if (errno == ERANGE || end == value || *end != '\0') {
+        return false;
+    }
+    *parsed = static_cast<uint64>(number);
+    return true;
+}
+
+void Bm25GlobalStatCacheStore(Oid databaseOid, Oid relationOid,
+                              AttrNumber columnAttnum, const char* stat)
 {
     InitializeBm25GlobalStatCache();
-    *statOut = NULL;
-    Bm25GlobalStatCacheKey key =
-        Bm25GlobalStatCacheMakeKey(databaseOid, relationOid, queryText);
+    if (stat == NULL || stat[0] == '\0') {
+        return;
+    }
+
+    char* buffer = pstrdup(stat);
+    char* firstSemi = strchr(buffer, ';');
+    char* secondSemi = firstSemi == NULL ? NULL : strchr(firstSemi + 1, ';');
+    if (firstSemi == NULL || secondSemi == NULL) {
+        pfree(buffer);
+        return;
+    }
+    *firstSemi = '\0';
+    *secondSemi = '\0';
+    uint64 documentCount = 0;
+    uint64 tokenCount = 0;
+    if (strncmp(buffer, "N=", 2) != 0 ||
+        strncmp(firstSemi + 1, "T=", 2) != 0 ||
+        !Bm25GlobalStatParseUnsigned(buffer + 2, &documentCount) ||
+        !Bm25GlobalStatParseUnsigned(firstSemi + 3, &tokenCount) ||
+        documentCount == 0 || tokenCount < documentCount) {
+        pfree(buffer);
+        return;
+    }
+
+    Bm25GlobalStatKey key = {databaseOid, relationOid, columnAttnum};
     TimestampTz now = GetCurrentTimestamp();
+    Bm25GlobalStatEntry statValue = {};
+    statValue.key = key;
+    statValue.documentCount = documentCount;
+    statValue.tokenCount = tokenCount;
+    statValue.updatedAt = now;
+    Bm25GlobalStatEntry* statSlot = Bm25GlobalStatCacheChooseSlot(&key);
+    if (statSlot != NULL) {
+        (void)Bm25CacheTryWrite(statSlot, &statValue);
+    }
 
-    AutoRWLock readLock(&g_bm25GlobalStatCacheLock);
-    readLock.RdLock();
-    Bm25GlobalStatCacheEntry* entry = static_cast<Bm25GlobalStatCacheEntry*>(
-        hash_search(g_bm25GlobalStatCache, &key, HASH_FIND, NULL));
-    if (entry != NULL && entry->stat[0] != '\0' &&
-        now - entry->updatedAt <= BM25_GLOBAL_STAT_CACHE_TTL_US) {
-        *statOut = pstrdup(entry->stat);
-        readLock.UnLock();
-        return BM25_GLOBAL_STAT_CACHE_HIT;
-    }
-    if (entry != NULL && entry->refreshing) {
-        readLock.UnLock();
-        return BM25_GLOBAL_STAT_CACHE_FALLBACK;
-    }
-    readLock.UnLock();
-
-    AutoRWLock writeLock(&g_bm25GlobalStatCacheLock);
-    writeLock.WrLock();
-    bool found = false;
-    entry = static_cast<Bm25GlobalStatCacheEntry*>(
-        hash_search(g_bm25GlobalStatCache, &key, HASH_ENTER_NULL, &found));
-    if (entry == NULL) {
-        Bm25GlobalStatCacheEntry* oldest = Bm25GlobalStatCacheOldestEntry();
-        if (oldest != NULL) {
-            Bm25GlobalStatCacheKey oldestKey = oldest->key;
-            (void)hash_search(g_bm25GlobalStatCache, &oldestKey, HASH_REMOVE, NULL);
-            entry = static_cast<Bm25GlobalStatCacheEntry*>(
-                hash_search(g_bm25GlobalStatCache, &key, HASH_ENTER_NULL, &found));
+    char* pairContext = NULL;
+    for (char* pair = strtok_r(secondSemi + 1, ",", &pairContext);
+         pair != NULL; pair = strtok_r(NULL, ",", &pairContext)) {
+        char* colon = strchr(pair, ':');
+        if (colon == NULL || colon == pair) {
+            continue;
         }
-        if (entry == NULL) {
-            writeLock.UnLock();
-            return BM25_GLOBAL_STAT_CACHE_BYPASS;
+        *colon = '\0';
+        uint64 documentFrequency = 0;
+        if (strlen(pair) >= BM25_GLOBAL_STAT_TERM_LEN ||
+            !Bm25GlobalStatParseUnsigned(colon + 1, &documentFrequency) ||
+            documentFrequency == 0 || documentFrequency > documentCount) {
+            continue;
         }
-    }
-    if (found && entry->stat[0] != '\0' &&
-        now - entry->updatedAt <= BM25_GLOBAL_STAT_CACHE_TTL_US) {
-        *statOut = pstrdup(entry->stat);
-        writeLock.UnLock();
-        return BM25_GLOBAL_STAT_CACHE_HIT;
-    }
-    if (found && entry->refreshing) {
-        writeLock.UnLock();
-        return BM25_GLOBAL_STAT_CACHE_FALLBACK;
-    }
-    if (!found) {
-        errno_t rc = memset_s(((char*)entry) + sizeof(entry->key),
-                              sizeof(*entry) - sizeof(entry->key), 0,
-                              sizeof(*entry) - sizeof(entry->key));
+        uint32 termHash =
+            hash_any(reinterpret_cast<const unsigned char*>(pair), strlen(pair));
+        Bm25GlobalTermEntry termValue = {};
+        termValue.key = key;
+        termValue.termHash = termHash;
+        termValue.documentFrequency = documentFrequency;
+        termValue.updatedAt = now;
+        errno_t rc = strncpy_s(termValue.term, sizeof(termValue.term), pair,
+                               sizeof(termValue.term) - 1);
         securec_check(rc, "\0", "\0");
-    }
-    entry->refreshing = true;
-    writeLock.UnLock();
-    return BM25_GLOBAL_STAT_CACHE_REFRESH;
-}
-
-void Bm25GlobalStatCacheStore(Oid databaseOid, Oid relationOid, const char* queryText,
-                              const char* stat)
-{
-    InitializeBm25GlobalStatCache();
-    Bm25GlobalStatCacheKey key =
-        Bm25GlobalStatCacheMakeKey(databaseOid, relationOid, queryText);
-    AutoRWLock writeLock(&g_bm25GlobalStatCacheLock);
-    writeLock.WrLock();
-    bool found = false;
-    Bm25GlobalStatCacheEntry* entry = static_cast<Bm25GlobalStatCacheEntry*>(
-        hash_search(g_bm25GlobalStatCache, &key, HASH_ENTER_NULL, &found));
-    if (entry != NULL) {
-        if (!found) {
-            errno_t rc = memset_s(((char*)entry) + sizeof(entry->key),
-                                  sizeof(*entry) - sizeof(entry->key), 0,
-                                  sizeof(*entry) - sizeof(entry->key));
-            securec_check(rc, "\0", "\0");
+        Bm25GlobalTermEntry* termSlot =
+            Bm25GlobalTermCacheChooseSlot(&key, pair, termHash);
+        if (termSlot != NULL) {
+            (void)Bm25CacheTryWrite(termSlot, &termValue);
         }
-        size_t statLength = strlen(stat);
-        if (statLength < sizeof(entry->stat)) {
-            errno_t rc = strncpy_s(entry->stat, sizeof(entry->stat), stat, statLength);
-            securec_check(rc, "\0", "\0");
-            entry->updatedAt = GetCurrentTimestamp();
-        } else {
-            entry->stat[0] = '\0';
-            entry->updatedAt = 0;
-        }
-        entry->refreshing = false;
     }
-    writeLock.UnLock();
-}
-
-void Bm25GlobalStatCacheAbortRefresh(Oid databaseOid, Oid relationOid,
-                                     const char* queryText)
-{
-    InitializeBm25GlobalStatCache();
-    Bm25GlobalStatCacheKey key =
-        Bm25GlobalStatCacheMakeKey(databaseOid, relationOid, queryText);
-    AutoRWLock writeLock(&g_bm25GlobalStatCacheLock);
-    writeLock.WrLock();
-    Bm25GlobalStatCacheEntry* entry = static_cast<Bm25GlobalStatCacheEntry*>(
-        hash_search(g_bm25GlobalStatCache, &key, HASH_FIND, NULL));
-    if (entry != NULL) {
-        entry->refreshing = false;
-    }
-    writeLock.UnLock();
+    pfree(buffer);
 }

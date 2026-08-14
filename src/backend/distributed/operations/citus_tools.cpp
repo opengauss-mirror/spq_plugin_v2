@@ -12,12 +12,18 @@
 
 #include "postgres.h"
 
+#include "access/datavec/bm25.h"
 #include "funcapi.h"
 #include "libpq/libpq-fe.h"
 #include "knl/knl_variable.h"
 #include "miscadmin.h"
+#include "access/genam.h"
+#include "catalog/pg_am.h"
+#include "catalog/namespace.h"
 #include "executor/exec/execdesc.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/clauses.h"
+#include "utils/rel.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 
@@ -523,7 +529,7 @@ extern "C" Datum bm25_collect_global_stat(PG_FUNCTION_ARGS);
  * truncated here and their df is attributed to the wrong term. Keep in sync with
  * BM25_MAX_TOKEN_LEN in access/datavec/bm25.h (the kernel truncates to that size).
  */
-#define BM25_GLOBAL_DF_TERM_LEN 100
+#define BM25_GLOBAL_DF_TERM_LEN BM25_GLOBAL_STAT_TERM_LEN
 
 /* Per query-term global document frequency accumulator. */
 typedef struct Bm25DfEntry {
@@ -552,6 +558,11 @@ static bool Bm25ParseUnsigned(const char* value, uint64* parsed)
 {
     if (value == NULL || *value == '\0') {
         return false;
+    }
+    for (const char* cursor = value; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9') {
+            return false;
+        }
     }
     errno = 0;
     char* end = NULL;
@@ -583,6 +594,11 @@ static void Bm25AccumulateDf(Bm25DfEntry** entries, int* count, int* capacity,
 {
     for (int i = 0; i < *count; i++) {
         if (strcmp((*entries)[i].term, term) == 0) {
+            if (UINT64_MAX - (*entries)[i].df < df) {
+                ereport(ERROR,
+                        (errmsg("bm25 global document frequency overflow for term \"%s\"",
+                                term)));
+            }
             (*entries)[i].df += df;
             return;
         }
@@ -618,11 +634,17 @@ static bool Bm25ParseShardStat(char* shard, uint64* totalN, uint64* totalT,
             if (!Bm25ParseUnsigned(part + 2, &value)) {
                 return false;
             }
+            if (UINT64_MAX - *totalN < value) {
+                return false;
+            }
             *totalN += value;
             sawN = true;
         } else if (strncmp(part, "T=", 2) == 0) {
             uint64 value = 0;
             if (!Bm25ParseUnsigned(part + 2, &value)) {
+                return false;
+            }
+            if (UINT64_MAX - *totalT < value) {
                 return false;
             }
             *totalT += value;
@@ -685,6 +707,111 @@ static bool Bm25QueryPrefixIsSafe(void)
     return !IsMultiStatementTransaction() && !InCoordinatedTransaction();
 }
 
+static void Bm25ClearCollectedStatResults(MultiConnection** connections,
+                                          const bool* commandSent, int connectionCount)
+{
+    for (int index = 0; index < connectionCount; ++index) {
+        if (commandSent[index]) {
+            ClearResults(connections[index], false);
+        }
+    }
+}
+
+static bool Bm25TermIsCacheable(const char* term)
+{
+    if (term == NULL || term[0] == '\0' || strlen(term) >= BM25_GLOBAL_DF_TERM_LEN) {
+        return false;
+    }
+    for (const unsigned char* cursor = reinterpret_cast<const unsigned char*>(term);
+         *cursor != '\0'; ++cursor) {
+        if (*cursor == ';' || *cursor == ',' || *cursor == ':' ||
+            *cursor == ' ' || (*cursor >= '\t' && *cursor <= '\r')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static Oid Bm25FindLogicalIndex(Oid relationOid, AttrNumber columnAttnum)
+{
+    Oid matchedIndex = InvalidOid;
+    Relation relation = relation_open(relationOid, AccessShareLock);
+    List* indexList = RelationGetIndexList(relation);
+    ListCell* indexCell = NULL;
+    foreach (indexCell, indexList) {
+        Oid indexOid = lfirst_oid(indexCell);
+        Relation index = index_open(indexOid, AccessShareLock);
+        bool matches = index->rd_rel->relam == BM25_AM_OID &&
+                       index->rd_index != NULL && index->rd_index->indnatts == 1 &&
+                       index->rd_index->indkey.values[0] == columnAttnum &&
+                       index->rd_index->indisvalid && index->rd_index->indisready;
+        index_close(index, AccessShareLock);
+        if (!matches) {
+            continue;
+        }
+        if (OidIsValid(matchedIndex)) {
+            matchedIndex = InvalidOid;
+            break;
+        }
+        matchedIndex = indexOid;
+    }
+    list_free(indexList);
+    relation_close(relation, AccessShareLock);
+    return matchedIndex;
+}
+
+static char** Bm25TokenizeQueryForCache(Oid relationOid, AttrNumber columnAttnum,
+                                        const char* queryText, int* termCount)
+{
+    *termCount = 0;
+    Oid indexOid = Bm25FindLogicalIndex(relationOid, columnAttnum);
+    if (!OidIsValid(indexOid)) {
+        return NULL;
+    }
+
+    Relation index = index_open(indexOid, AccessShareLock);
+    BM25TokenizedDocData tokenized =
+        BM25DocumentTokenize(queryText, Bm25GetDictPath(index), true);
+    index_close(index, AccessShareLock);
+    if (tokenized.tokenCount == 0) {
+        pfree_ext(tokenized.tokenDatas);
+        return NULL;
+    }
+
+    char** terms = static_cast<char**>(palloc0(tokenized.tokenCount * sizeof(char*)));
+    for (uint32 tokenIndex = 0; tokenIndex < tokenized.tokenCount; ++tokenIndex) {
+        const char* term = tokenized.tokenDatas[tokenIndex].tokenValue;
+        if (!Bm25TermIsCacheable(term)) {
+            continue;
+        }
+        bool duplicate = false;
+        for (int existing = 0; existing < *termCount; ++existing) {
+            if (strcmp(terms[existing], term) == 0) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            terms[*termCount] = pstrdup(term);
+            (*termCount)++;
+        }
+    }
+    pfree(tokenized.tokenDatas);
+    if (*termCount == 0) {
+        pfree(terms);
+        return NULL;
+    }
+    return terms;
+}
+
+static void Bm25FreeTerms(char** terms, int termCount)
+{
+    for (int index = 0; index < termCount; ++index) {
+        pfree(terms[index]);
+    }
+    pfree_ext(terms);
+}
+
 void ResetBm25GlobalStatQueryPrefix(void)
 {
     pfree_ext(Bm25QueryPrefix);
@@ -707,12 +834,13 @@ const char* GetBm25GlobalStatQueryPrefix(void)
  * a separate BEGIN/COMMIT cycle and the activeSetStmts replay path.
  *
  * tableName limits collection to one distributed table's shards (shard relations are
- * named <table>_<shardid> on the DNs); NULL aggregates every BM25 shard index, which
- * is only correct when a single BM25-indexed table exists.
+ * named <table>_<shardid> on the DNs). columnName optionally selects one BM25-indexed
+ * column; without it, the DN requires each shard table to have one BM25 index.
  *
  * Returns false (leaving GUCs untouched) when no shard reported documents.
  */
 static bool Bm25CollectGlobalStatInternal(const char* queryStr, const char* tableName,
+                                          const char* columnName, const char* schemaName,
                                           StringInfo summary, StringInfo statOut)
 {
     List* workerNodes = ActivePrimaryNodeList(NoLock);
@@ -772,8 +900,18 @@ static bool Bm25CollectGlobalStatInternal(const char* queryStr, const char* tabl
     StringInfoData sql;
     initStringInfo(&sql);
     char* shardRegex = Bm25ShardTableRegex(tableName);
-    appendStringInfo(&sql, "SELECT pg_catalog.bm25_table_stat(%s, %s)",
-                     quote_literal_cstr(shardRegex), quote_literal_cstr(queryStr));
+    if (columnName == NULL) {
+        appendStringInfo(&sql, "SELECT pg_catalog.bm25_table_stat(%s, %s)",
+                         quote_literal_cstr(shardRegex), quote_literal_cstr(queryStr));
+    } else if (schemaName == NULL) {
+        appendStringInfo(&sql, "SELECT pg_catalog.bm25_table_stat(%s, %s, %s)",
+                         quote_literal_cstr(shardRegex), quote_literal_cstr(queryStr),
+                         quote_literal_cstr(columnName));
+    } else {
+        appendStringInfo(&sql, "SELECT pg_catalog.bm25_table_stat(%s, %s, %s, %s)",
+                         quote_literal_cstr(shardRegex), quote_literal_cstr(queryStr),
+                         quote_literal_cstr(columnName), quote_literal_cstr(schemaName));
+    }
     pfree(shardRegex);
 
     /* send to all DNs first, then reap: effectively parallel on cached connections */
@@ -793,42 +931,58 @@ static bool Bm25CollectGlobalStatInternal(const char* queryStr, const char* tabl
     int dfCount = 0;
     Bm25DfEntry* dfEntries = (Bm25DfEntry*)palloc0(dfCapacity * sizeof(Bm25DfEntry));
 
-    for (int i = 0; i < connCount; i++) {
-        if (!commandSent[i]) {
-            continue;
-        }
-        PGresult* result = GetRemoteCommandResult(conns[i], true);
-        if (result != NULL && PQresultStatus(result) == PGRES_TUPLES_OK) {
-            for (int r = 0; r < PQntuples(result); r++) {
-                if (PQgetisnull(result, r, 0)) {
-                    statsComplete = false;
-                    continue;
-                }
-                char* val = pstrdup(PQgetvalue(result, r, 0));
-                if (!Bm25ParseShardStat(val, &totalN, &totalT, &dfEntries, &dfCount,
-                                        &dfCapacity)) {
-                    statsComplete = false;
-                    ereport(
-                        WARNING,
-                        (errmsg("bm25_collect_global_stat: invalid statistics from %s:%d",
-                                nodeNames[i], nodePorts[i])));
-                }
-                pfree(val);
+    PG_TRY();
+    {
+        for (int i = 0; i < connCount; i++) {
+            if (!commandSent[i]) {
+                continue;
             }
-        } else {
-            statsComplete = false;
-            ereport(WARNING, (errmsg("bm25_collect_global_stat: error from %s:%d: %s",
-                                     nodeNames[i], nodePorts[i],
-                                     result == NULL ? "no result"
-                                                    : PQresultErrorMessage(result))));
+            PGresult* result = GetRemoteCommandResult(conns[i], true);
+            if (result != NULL && PQresultStatus(result) == PGRES_TUPLES_OK) {
+                for (int r = 0; r < PQntuples(result); r++) {
+                    if (PQgetisnull(result, r, 0)) {
+                        statsComplete = false;
+                        continue;
+                    }
+                    char* val = pstrdup(PQgetvalue(result, r, 0));
+                    if (!Bm25ParseShardStat(val, &totalN, &totalT, &dfEntries, &dfCount,
+                                            &dfCapacity)) {
+                        statsComplete = false;
+                        ereport(
+                            WARNING,
+                            (errmsg("bm25_collect_global_stat: invalid statistics from %s:%d",
+                                    nodeNames[i], nodePorts[i])));
+                    }
+                    pfree(val);
+                }
+            } else {
+                statsComplete = false;
+                ereport(WARNING, (errmsg("bm25_collect_global_stat: error from %s:%d: %s",
+                                         nodeNames[i], nodePorts[i],
+                                         result == NULL ? "no result"
+                                                        : PQresultErrorMessage(result))));
+            }
+            if (result != NULL) {
+                PQclear(result);
+            }
+            ClearResults(conns[i], false);
+            commandSent[i] = false;
         }
-        if (result != NULL) {
-            PQclear(result);
-        }
-        ClearResults(conns[i], false);
     }
+    PG_CATCH();
+    {
+        Bm25ClearCollectedStatResults(conns, commandSent, connCount);
+        pfree(dfEntries);
+        pfree(sql.data);
+        pfree(conns);
+        pfree(nodeNames);
+        pfree(nodePorts);
+        pfree(commandSent);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
 
-    if (!statsComplete || totalN == 0) {
+    if (!statsComplete || totalN == 0 || totalN > UINT_MAX || totalT < totalN) {
         pfree(dfEntries);
         pfree(sql.data);
         pfree(conns);
@@ -844,6 +998,26 @@ static bool Bm25CollectGlobalStatInternal(const char* queryStr, const char* tabl
      * their normal local fallback for them.
      */
     Bm25RemoveZeroDfEntries(dfEntries, &dfCount);
+    if (dfCount == 0) {
+        pfree(dfEntries);
+        pfree(sql.data);
+        pfree(conns);
+        pfree(nodeNames);
+        pfree(nodePorts);
+        pfree(commandSent);
+        return false;
+    }
+    for (int index = 0; index < dfCount; ++index) {
+        if (dfEntries[index].df > totalN || dfEntries[index].df > UINT_MAX) {
+            pfree(dfEntries);
+            pfree(sql.data);
+            pfree(conns);
+            pfree(nodeNames);
+            pfree(nodePorts);
+            pfree(commandSent);
+            return false;
+        }
+    }
 
     StringInfoData dfStr;
     initStringInfo(&dfStr);
@@ -877,7 +1051,7 @@ static bool Bm25CollectGlobalStatInternal(const char* queryStr, const char* tabl
 }
 
 /*
- * bm25_collect_global_stat(query_text text [, table_name text])
+ * bm25_collect_global_stat(query_text text, table_name text [, column_name text])
  *
  * SQL entry of Bm25CollectGlobalStatInternal for manual/debug use; the transparent
  * path is TryCollectBm25GlobalStat called from CitusExecutorStart.
@@ -889,18 +1063,25 @@ Datum bm25_collect_global_stat(PG_FUNCTION_ARGS)
     if (PG_ARGISNULL(0)) {
         ereport(ERROR, (errmsg("bm25_collect_global_stat: query_text must not be NULL")));
     }
+    if (PG_ARGISNULL(1)) {
+        ereport(ERROR, (errmsg("bm25_collect_global_stat: table_name must not be NULL")));
+    }
     char* queryStr = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    char* tableName = (PG_NARGS() > 1 && !PG_ARGISNULL(1))
-                          ? text_to_cstring(PG_GETARG_TEXT_PP(1))
-                          : NULL;
+    char* tableName = text_to_cstring(PG_GETARG_TEXT_PP(1));
+    char* columnName = (PG_NARGS() > 2 && !PG_ARGISNULL(2))
+                           ? text_to_cstring(PG_GETARG_TEXT_PP(2))
+                           : NULL;
 
     StringInfoData summary;
     StringInfoData stat;
     initStringInfo(&summary);
     initStringInfo(&stat);
-    if (!Bm25CollectGlobalStatInternal(queryStr, tableName, &summary, &stat)) {
+    if (!Bm25CollectGlobalStatInternal(queryStr, tableName, columnName, NULL,
+                                       &summary, &stat)) {
         pfree(queryStr);
-        pfree_ext(tableName);
+        pfree(tableName);
+        pfree_ext(columnName);
+        pfree(summary.data);
         pfree(stat.data);
         PG_RETURN_TEXT_P(cstring_to_text("no stats"));
     }
@@ -914,20 +1095,30 @@ Datum bm25_collect_global_stat(PG_FUNCTION_ARGS)
     Bm25SetLocalGuc("bm25_global_stat", stat.data);
 
     pfree(queryStr);
-    pfree_ext(tableName);
+    pfree(tableName);
+    pfree_ext(columnName);
     pfree(stat.data);
-    PG_RETURN_TEXT_P(cstring_to_text(summary.data));
+    text* result = cstring_to_text(summary.data);
+    pfree(summary.data);
+    PG_RETURN_TEXT_P(result);
 }
 
 /* <&> BM25 ordering operator OID (kernel builtin, see pg_operator) */
 #define BM25_ORDER_BY_OP_OID 6208
 
 /*
- * Bm25QueryTextWalker finds a BM25 <&> OpExpr with a constant text argument anywhere
- * in a (worker job) query tree and extracts the search text. Parameterized query
- * texts are not extractable here, so those queries simply keep local IDF.
+ * Bm25QueryInfoWalker finds a BM25 <&> OpExpr with a constant text argument and
+ * records the indexed Var. Parameterized query texts are not extractable here, so
+ * those queries simply keep local IDF.
  */
-static bool Bm25QueryTextWalker(Node* node, char** queryTextOut)
+typedef struct Bm25QueryInfo {
+    char* queryText;
+    Index varno;
+    AttrNumber varattno;
+    bool ambiguous;
+} Bm25QueryInfo;
+
+static bool Bm25QueryInfoWalker(Node* node, Bm25QueryInfo* queryInfo)
 {
     if (node == NULL) {
         return false;
@@ -937,25 +1128,43 @@ static bool Bm25QueryTextWalker(Node* node, char** queryTextOut)
         if (op->opno == BM25_ORDER_BY_OP_OID && list_length(op->args) == 2) {
             Node* left = (Node*)linitial(op->args);
             Node* right = (Node*)lsecond(op->args);
+            Node* strippedLeft = strip_implicit_coercions(left);
+            Node* strippedRight = strip_implicit_coercions(right);
             Const* con = NULL;
-            if (IsA(right, Const)) {
-                con = (Const*)right;
-            } else if (IsA(left, Const)) {
-                con = (Const*)left;
+            Var* var = NULL;
+            if (IsA(strippedRight, Const) && IsA(strippedLeft, Var)) {
+                con = (Const*)strippedRight;
+                var = (Var*)strippedLeft;
+            } else if (IsA(strippedLeft, Const) && IsA(strippedRight, Var)) {
+                con = (Const*)strippedLeft;
+                var = (Var*)strippedRight;
             }
-            if (con != NULL && !con->constisnull && con->consttype == TEXTOID) {
-                *queryTextOut = text_to_cstring(DatumGetTextPP(con->constvalue));
-                return true;
+            if (con != NULL && var != NULL && var->varattno > 0 &&
+                !con->constisnull && con->consttype == TEXTOID) {
+                char* queryText = text_to_cstring(DatumGetTextPP(con->constvalue));
+                if (queryInfo->queryText == NULL) {
+                    queryInfo->queryText = queryText;
+                    queryInfo->varno = var->varno;
+                    queryInfo->varattno = var->varattno;
+                } else if (queryInfo->varno != var->varno ||
+                           queryInfo->varattno != var->varattno ||
+                           strcmp(queryInfo->queryText, queryText) != 0) {
+                    queryInfo->ambiguous = true;
+                    pfree(queryText);
+                    return true;
+                } else {
+                    pfree(queryText);
+                }
             }
         }
     }
     if (IsA(node, Query)) {
         return query_tree_walker((Query*)node,
-                                 reinterpret_cast<bool (*)()>(Bm25QueryTextWalker),
-                                 queryTextOut, 0);
+                                 reinterpret_cast<bool (*)()>(Bm25QueryInfoWalker),
+                                 queryInfo, 0);
     }
-    return expression_tree_walker(node, reinterpret_cast<bool (*)()>(Bm25QueryTextWalker),
-                                  queryTextOut);
+    return expression_tree_walker(node, reinterpret_cast<bool (*)()>(Bm25QueryInfoWalker),
+                                  queryInfo);
 }
 
 /*
@@ -992,9 +1201,9 @@ static DistributedPlan* FindSpqDistributedPlan(Plan* plan)
  * plan's worker job query, collects the cluster-wide stats and injects them as
  * SET LOCAL GUCs before the plan is shipped, so one plain SQL statement suffices.
  *
- * Statistics are cached by database, logical relation and query text. Fresh hits avoid
- * all DN traffic. On a miss or expiry one backend refreshes without holding the cache
- * lock; concurrent backends do not wait and keep local IDF for that statement.
+ * CN tokenizes with the logical BM25 index and caches N/T by table-column and df by
+ * normalized term. A query whose complete term set is fresh avoids all DN traffic;
+ * any miss or expiry refreshes the whole query and updates the fixed-size caches.
  */
 void TryCollectBm25GlobalStat(QueryDesc* queryDesc)
 {
@@ -1024,72 +1233,95 @@ void TryCollectBm25GlobalStat(QueryDesc* queryDesc)
         return;
     }
 
-    char* queryText = NULL;
+    Bm25QueryInfo queryInfo = {NULL, 0, InvalidAttrNumber, false};
     (void)query_tree_walker(distributedPlan->workerJob->jobQuery,
-                            reinterpret_cast<bool (*)()>(Bm25QueryTextWalker), &queryText,
+                            reinterpret_cast<bool (*)()>(Bm25QueryInfoWalker), &queryInfo,
                             0);
-    if (queryText == NULL) {
-        ereport(DEBUG1, (errmsg("bm25 auto-collect: no <&> const found in job query")));
+    if (queryInfo.ambiguous) {
+        ereport(DEBUG1,
+                (errmsg("bm25 auto-collect: multiple distinct BM25 expressions found, "
+                        "keeping local IDF for the statement")));
+        pfree_ext(queryInfo.queryText);
+        return;
+    }
+    if (queryInfo.queryText == NULL) {
+        ereport(DEBUG1, (errmsg("bm25 auto-collect: no <&> column/const pair found in job query")));
         return;
     }
 
     /* limit collection to the queried table's shards when the plan tells us */
     char* tableName = NULL;
+    char* columnName = NULL;
+    char* schemaName = NULL;
     Oid relationOid = InvalidOid;
+    AttrNumber logicalAttnum = InvalidAttrNumber;
     if (list_length(distributedPlan->relationIdList) == 1) {
         relationOid = linitial_oid(distributedPlan->relationIdList);
         tableName = get_rel_name(relationOid);
+        schemaName = get_namespace_name(get_rel_namespace(relationOid));
+        logicalAttnum = queryInfo.varattno;
+        RangeTblEntry* workerRte = (RangeTblEntry*)list_nth(
+            distributedPlan->workerJob->jobQuery->rtable, queryInfo.varno - 1);
+        if (workerRte != NULL && workerRte->eref != NULL &&
+            logicalAttnum <= list_length(workerRte->eref->colnames)) {
+            Value* columnValue = (Value*)list_nth(workerRte->eref->colnames, logicalAttnum - 1);
+            if (columnValue != NULL && IsA(columnValue, String)) {
+                logicalAttnum = get_attnum(relationOid, strVal(columnValue));
+            }
+        }
+        if (logicalAttnum != InvalidAttrNumber) {
+            columnName = get_attname(relationOid, logicalAttnum, true);
+        }
     }
-    if (!OidIsValid(relationOid) || tableName == NULL) {
-        pfree(queryText);
+    if (!OidIsValid(relationOid) || tableName == NULL || columnName == NULL ||
+        schemaName == NULL) {
+        pfree(queryInfo.queryText);
+        return;
+    }
+
+    int termCount = 0;
+    char** terms =
+        Bm25TokenizeQueryForCache(relationOid, logicalAttnum, queryInfo.queryText,
+                                  &termCount);
+    if (terms == NULL) {
+        pfree(queryInfo.queryText);
         return;
     }
 
     char* cachedStat = NULL;
-    Bm25GlobalStatCacheResult cacheResult = Bm25GlobalStatCacheLookup(
-        u_sess->proc_cxt.MyDatabaseId, relationOid, queryText, &cachedStat);
-    if (cacheResult == BM25_GLOBAL_STAT_CACHE_HIT) {
+    if (Bm25GlobalStatCacheLookup(
+            u_sess->proc_cxt.MyDatabaseId, relationOid, logicalAttnum,
+            const_cast<const char* const*>(terms), termCount, &cachedStat)) {
         Bm25SetQueryPrefix(cachedStat);
         pfree(cachedStat);
-        pfree(queryText);
-        return;
-    }
-    if (cacheResult == BM25_GLOBAL_STAT_CACHE_FALLBACK) {
-        pfree(queryText);
+        Bm25FreeTerms(terms, termCount);
+        pfree(queryInfo.queryText);
         return;
     }
 
     ereport(DEBUG1,
-            (errmsg("bm25 auto-collect: collecting for query text \"%s\" (table %s)",
-                    queryText, tableName ? tableName : "<all>")));
+            (errmsg("bm25 auto-collect: collecting for query text \"%s\" (table %s, column %s)",
+                    queryInfo.queryText, tableName, columnName)));
     StringInfoData stat;
     initStringInfo(&stat);
     PG_TRY();
     {
-        if (Bm25CollectGlobalStatInternal(queryText, tableName, NULL, &stat)) {
+        if (Bm25CollectGlobalStatInternal(queryInfo.queryText, tableName, columnName,
+                                          schemaName, NULL, &stat)) {
             Bm25SetQueryPrefix(stat.data);
-            if (cacheResult == BM25_GLOBAL_STAT_CACHE_REFRESH) {
-                Bm25GlobalStatCacheStore(u_sess->proc_cxt.MyDatabaseId, relationOid,
-                                         queryText, stat.data);
-            }
-        } else {
-            if (cacheResult == BM25_GLOBAL_STAT_CACHE_REFRESH) {
-                Bm25GlobalStatCacheAbortRefresh(u_sess->proc_cxt.MyDatabaseId,
-                                                relationOid, queryText);
-            }
+            Bm25GlobalStatCacheStore(u_sess->proc_cxt.MyDatabaseId, relationOid,
+                                     logicalAttnum, stat.data);
         }
     }
     PG_CATCH();
     {
-        if (cacheResult == BM25_GLOBAL_STAT_CACHE_REFRESH) {
-            Bm25GlobalStatCacheAbortRefresh(u_sess->proc_cxt.MyDatabaseId, relationOid,
-                                            queryText);
-        }
         pfree(stat.data);
-        pfree(queryText);
+        Bm25FreeTerms(terms, termCount);
+        pfree(queryInfo.queryText);
         PG_RE_THROW();
     }
     PG_END_TRY();
     pfree(stat.data);
-    pfree(queryText);
+    Bm25FreeTerms(terms, termCount);
+    pfree(queryInfo.queryText);
 }

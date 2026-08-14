@@ -25,6 +25,7 @@
 #include "distributed/commands.h"
 #include "distributed/session_ctx.h"
 #include "distributed/backend_data.h"
+#include "distributed/bm25_global_stat_cache.h"
 #include "distributed/shared_connection_stats.h"
 #include "distributed/shard_cleaner.h"
 #include "distributed/utils/spq_io_multiplex.h"
@@ -511,6 +512,15 @@ void GlobalROVariables::RegisterAll()
         NULL, &StatStatementsMax, 50000, 1000, 10000000, PGC_POSTMASTER,
         GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE, NULL, NULL, NULL);
 #endif
+    DefineCustomIntVariable(
+        "spq.bm25_global_stat_cache_ttl",
+        gettext_noop("Sets the lifetime of cached BM25 global statistics."),
+        gettext_noop("Longer values reduce distributed statistic refreshes at the cost "
+                     "of allowing BM25 document counts and document frequencies to "
+                     "remain stale for longer."),
+        &Bm25GlobalStatCacheTtlSeconds, 3600, 1, 86400, PGC_SIGHUP,
+        GUC_UNIT_S | GUC_STANDARD, NULL, NULL, NULL);
+
     DefineCustomIntVariable(
         "spq.max_client_connections",
         gettext_noop("Sets the maximum number of connections regular clients can make"),
