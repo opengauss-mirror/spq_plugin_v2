@@ -33,6 +33,7 @@
 #include "distributed/shard_cleaner.h"
 #include "distributed/shard_rebalancer.h"
 #include "distributed/session_ctx.h"
+#include "distributed/version_compat.h"
 #include "distributed/worker_transaction.h"
 #include "distributed/commands.h"
 #include "distributed/metadata_sync.h"
@@ -1039,7 +1040,7 @@ static uint64 GetNextCleanupRecordId(void)
 
     bool missingOK = false;
     Oid sequenceId = RangeVarGetRelid(sequenceName, NoLock, missingOK);
-    return nextval_internal(sequenceId);
+    return NextvalInternalCompat(sequenceId);
 }
 
 /*

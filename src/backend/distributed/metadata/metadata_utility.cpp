@@ -2532,7 +2532,7 @@ Oid BackgroundTaskStatusOid(BackgroundTaskStatus status)
  */
 static int64 GetNextBackgroundJobsJobId(void)
 {
-    return DatumGetInt64(nextval_internal(DistBackgroundJobJobIdSequenceId()));
+    return DatumGetInt64(NextvalInternalCompat(DistBackgroundJobJobIdSequenceId()));
 }
 
 /*
@@ -2544,7 +2544,7 @@ static int64 GetNextBackgroundJobsJobId(void)
  */
 static int64 GetNextBackgroundTaskTaskId(void)
 {
-    return DatumGetInt64(nextval_internal(DistBackgroundTaskTaskIdSequenceId()));
+    return DatumGetInt64(NextvalInternalCompat(DistBackgroundTaskTaskIdSequenceId()));
 }
 
 /*

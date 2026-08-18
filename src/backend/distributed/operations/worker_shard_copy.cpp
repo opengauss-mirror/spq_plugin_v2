@@ -84,7 +84,7 @@ static bool CanUseLocalCopy(uint32_t destinationNodeId);
 static StringInfo ConstructShardCopyStatement(List* destinationShardFullyQualifiedName,
                                               bool useBinaryFormat, TupleDesc tupleDesc);
 static void WriteLocalTuple(TupleTableSlot* slot, ShardCopyDestReceiver* copyDest);
-static int ReadFromLocalBufferCallback(CopyState cstate, void* outBuf, int minRead,
+static int ReadFromLocalBufferCallback(CopyState cstate, char* outBuf, int minRead,
                                        int maxRead);
 static void LocalCopyToShard(ShardCopyDestReceiver* copyDest,
                              CopyOutState localCopyOutState);
@@ -557,7 +557,7 @@ static void LocalCopyToShard(ShardCopyDestReceiver* copyDest,
  * ReadFromLocalBufferCallback is the copy callback.
  * It always tries to copy maxRead bytes.
  */
-static int ReadFromLocalBufferCallback(CopyState cstate, void* outBuf, int minRead,
+static int ReadFromLocalBufferCallback(CopyState cstate, char* outBuf, int minRead,
                                        int maxRead)
 {
     int bytesRead = 0;

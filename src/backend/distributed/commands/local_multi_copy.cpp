@@ -48,7 +48,7 @@ static bool ShouldAddBinaryHeaders(StringInfo buffer, bool isBinary);
 static bool ShouldSendCopyNow(StringInfo buffer);
 static void DoLocalCopy(StringInfo buffer, Oid relationId, int64 shardId,
                         CopyStmt* copyStatement, bool isEndOfCopy, bool isPublishable);
-static int ReadFromLocalBufferCallback(CopyState cstate, void* outBuf, int minRead,
+static int ReadFromLocalBufferCallback(CopyState cstate, char* outBuf, int minRead,
                                        int maxRead);
 
 /*
@@ -214,7 +214,7 @@ static bool ShouldAddBinaryHeaders(StringInfo buffer, bool isBinary)
  * ReadFromLocalBufferCallback is the copy callback.
  * It always tries to copy maxRead bytes.
  */
-static int ReadFromLocalBufferCallback(CopyState cstate, void* outBuf, int minRead,
+static int ReadFromLocalBufferCallback(CopyState cstate, char* outBuf, int minRead,
                                        int maxRead)
 {
     int bytesRead = 0;
