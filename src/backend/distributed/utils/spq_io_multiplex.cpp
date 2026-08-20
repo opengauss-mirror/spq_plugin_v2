@@ -60,9 +60,15 @@ public:
     int WaitEvents(WaitEventSet* set, int curTimeout, WaitEvent* occurredEvents,
                    int expectEvents) override;
 
+    void Free() override
+    {
+        pfree(m_pollfds);
+        m_pollfds = nullptr;
+    }
+
 private:
     /** all poll's event handler */
-    struct pollfd* m_pollfds;
+    struct pollfd* m_pollfds{nullptr};
 };
 
 void PollIO::InitWaitEvent(WaitEvent* event, bool isModify)
@@ -208,14 +214,20 @@ public:
     /** free some resources in epoll. */
     void Free() override
     {
-        close(m_epollfd);
+        if (m_epollfd >= 0) {
+            close(m_epollfd);
+            m_epollfd = -1;
+        }
+
+        pfree(m_epollRetEvents);
+        m_epollRetEvents = nullptr;
     }
 
 private:
-    int m_epollfd;
+    int m_epollfd{-1};
 
     /* epoll_wait returns events in a user provided arrays, allocate once */
-    struct epoll_event* m_epollRetEvents;
+    struct epoll_event* m_epollRetEvents{nullptr};
 };
 
 void EpollIO::InitWaitEvent(WaitEvent* event, bool isModify)

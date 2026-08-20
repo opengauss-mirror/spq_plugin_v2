@@ -105,6 +105,7 @@ WaitEventSet* CreateWaitEventSet(ResourceOwner resowner, int nevents)
 void FreeWaitEventSet(WaitEventSet* set)
 {
     set->m_IOMultiplexor->Free();
+    pfree(set->m_IOMultiplexor);
 
     pfree(set);
 }
@@ -115,6 +116,7 @@ void FreeWaitEventSet(WaitEventSet* set)
 void FreeWaitEventSetAfterFork(WaitEventSet* set)
 {
     set->m_IOMultiplexor->Free();
+    pfree(set->m_IOMultiplexor);
 
     pfree(set);
 }
