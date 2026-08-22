@@ -149,6 +149,16 @@ List* ActivePrimaryNonCoordinatorNodeList(LOCKMODE lockMode)
 }
 
 /*
+ * ActivePrimaryNonCoordinatorNodeListForRead returns all active primary worker
+ * nodes for a read-only operation. Unlike ActivePrimaryNonCoordinatorNodeList,
+ * it does not require the local node to accept modifications.
+ */
+List* ActivePrimaryNonCoordinatorNodeListForRead(LOCKMODE lockMode)
+{
+    return FilterActiveNodeListFunc(lockMode, NodeIsPrimaryWorker);
+}
+
+/*
  * ActivePrimaryNodeList returns a list of all active primary nodes in
  * workerNodeHash.
  */

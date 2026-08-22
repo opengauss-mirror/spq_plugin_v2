@@ -21,6 +21,22 @@ CREATE INDEX bm25_global_cache_content_idx
     ON bm25_global_cache_test USING bm25(content);
 ANALYZE bm25_global_cache_test;
 
+-- The coordinator is metadata-only and deliberately cannot accept a TCP connection.
+UPDATE pg_dist_node
+SET nodeport = 1, shouldhaveshards = false
+WHERE groupid = 0;
+SELECT groupid = 0 AND noderole = 'primary' AND NOT shouldhaveshards
+       AS coordinator_is_metadata_only
+FROM pg_dist_node
+WHERE groupid = 0;
+SELECT bool_and(placement.groupid <> 0) AS all_shards_are_on_workers
+FROM pg_dist_shard AS shard
+JOIN pg_dist_placement AS placement USING (shardid)
+WHERE shard.logicalrelid = 'bm25_global_cache_test'::regclass;
+SELECT bm25_collect_global_stat(
+           'heart surgery', 'bm25_global_cache_test', 'content'
+       ) LIKE '%(workers=2)' AS collected_from_workers_only;
+
 -- First execution collects from DNs; repeated and overlapping queries reuse term cache.
 SELECT id
 FROM bm25_global_cache_test
@@ -46,6 +62,9 @@ UNION ALL
  ORDER BY content <&> 'surgery' DESC
  LIMIT 1);
 
+UPDATE pg_dist_node
+SET nodeport = :master_port
+WHERE groupid = 0;
 DROP TABLE bm25_global_cache_test;
 RESET enable_seqscan;
 RESET enable_bm25_global_idf;

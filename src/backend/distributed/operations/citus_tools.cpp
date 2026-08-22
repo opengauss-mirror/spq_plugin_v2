@@ -574,21 +574,6 @@ static bool Bm25ParseUnsigned(const char* value, uint64* parsed)
     return true;
 }
 
-static void Bm25RemoveZeroDfEntries(Bm25DfEntry* entries, int* count)
-{
-    int writeIndex = 0;
-    for (int readIndex = 0; readIndex < *count; readIndex++) {
-        if (entries[readIndex].df == 0) {
-            continue;
-        }
-        if (writeIndex != readIndex) {
-            entries[writeIndex] = entries[readIndex];
-        }
-        writeIndex++;
-    }
-    *count = writeIndex;
-}
-
 static void Bm25AccumulateDf(Bm25DfEntry** entries, int* count, int* capacity,
                              const char* term, uint64 df)
 {
@@ -724,8 +709,8 @@ static bool Bm25TermIsCacheable(const char* term)
     }
     for (const unsigned char* cursor = reinterpret_cast<const unsigned char*>(term);
          *cursor != '\0'; ++cursor) {
-        if (*cursor == ';' || *cursor == ',' || *cursor == ':' ||
-            *cursor == ' ' || (*cursor >= '\t' && *cursor <= '\r')) {
+        if (*cursor == ';' || *cursor == ',' || *cursor == ':' || *cursor == ' ' ||
+            (*cursor >= '\t' && *cursor <= '\r')) {
             return false;
         }
     }
@@ -741,8 +726,8 @@ static Oid Bm25FindLogicalIndex(Oid relationOid, AttrNumber columnAttnum)
     foreach (indexCell, indexList) {
         Oid indexOid = lfirst_oid(indexCell);
         Relation index = index_open(indexOid, AccessShareLock);
-        bool matches = index->rd_rel->relam == BM25_AM_OID &&
-                       index->rd_index != NULL && index->rd_index->indnatts == 1 &&
+        bool matches = index->rd_rel->relam == BM25_AM_OID && index->rd_index != NULL &&
+                       index->rd_index->indnatts == 1 &&
                        index->rd_index->indkey.values[0] == columnAttnum &&
                        index->rd_index->indisvalid && index->rd_index->indisready;
         index_close(index, AccessShareLock);
@@ -837,13 +822,17 @@ const char* GetBm25GlobalStatQueryPrefix(void)
  * named <table>_<shardid> on the DNs). columnName optionally selects one BM25-indexed
  * column; without it, the DN requires each shard table to have one BM25 index.
  *
+ * statOut receives the kernel-compatible payload with zero-df terms omitted.
+ * cacheStatOut receives the complete payload, including zero-df terms, so the
+ * cache can distinguish a known absence from a term that has not been collected.
  * Returns false (leaving GUCs untouched) when no shard reported documents.
  */
 static bool Bm25CollectGlobalStatInternal(const char* queryStr, const char* tableName,
                                           const char* columnName, const char* schemaName,
-                                          StringInfo summary, StringInfo statOut)
+                                          StringInfo summary, StringInfo statOut,
+                                          StringInfo cacheStatOut)
 {
-    List* workerNodes = ActivePrimaryNodeList(NoLock);
+    List* workerNodes = ActivePrimaryNonCoordinatorNodeListForRead(NoLock);
     int workerCount = list_length(workerNodes);
     if (workerCount == 0) {
         ereport(ERROR, (errmsg("bm25_collect_global_stat: no active worker nodes")));
@@ -950,8 +939,9 @@ static bool Bm25CollectGlobalStatInternal(const char* queryStr, const char* tabl
                         statsComplete = false;
                         ereport(
                             WARNING,
-                            (errmsg("bm25_collect_global_stat: invalid statistics from %s:%d",
-                                    nodeNames[i], nodePorts[i])));
+                            (errmsg(
+                                "bm25_collect_global_stat: invalid statistics from %s:%d",
+                                nodeNames[i], nodePorts[i])));
                     }
                     pfree(val);
                 }
@@ -992,12 +982,6 @@ static bool Bm25CollectGlobalStatInternal(const char* queryStr, const char* tabl
         return false;
     }
 
-    /*
-     * A term absent from every shard has no usable global df. The kernel's atomic
-     * payload intentionally requires df >= 1, so omit those terms and let scans use
-     * their normal local fallback for them.
-     */
-    Bm25RemoveZeroDfEntries(dfEntries, &dfCount);
     if (dfCount == 0) {
         pfree(dfEntries);
         pfree(sql.data);
@@ -1019,28 +1003,37 @@ static bool Bm25CollectGlobalStatInternal(const char* queryStr, const char* tabl
         }
     }
 
-    StringInfoData dfStr;
-    initStringInfo(&dfStr);
+    StringInfoData positiveDfStr;
+    StringInfoData cacheDfStr;
+    initStringInfo(&positiveDfStr);
+    initStringInfo(&cacheDfStr);
+    int positiveDfCount = 0;
     for (int i = 0; i < dfCount; i++) {
-        appendStringInfo(&dfStr, "%s%s:%lu", (i > 0 ? "," : ""), dfEntries[i].term,
+        appendStringInfo(&cacheDfStr, "%s%s:%lu", (i > 0 ? "," : ""), dfEntries[i].term,
                          (unsigned long)dfEntries[i].df);
+        if (dfEntries[i].df == 0) {
+            continue;
+        }
+        appendStringInfo(&positiveDfStr, "%s%s:%lu", positiveDfCount > 0 ? "," : "",
+                         dfEntries[i].term, (unsigned long)dfEntries[i].df);
+        positiveDfCount++;
     }
-
-    StringInfoData stat;
-    initStringInfo(&stat);
-    appendStringInfo(&stat, "N=%lu;T=%lu;%s", (unsigned long)totalN,
-                     (unsigned long)totalT, dfStr.data);
 
     if (summary != NULL) {
         appendStringInfo(summary, "N=%lu T=%lu df=%s (workers=%d)", (unsigned long)totalN,
-                         (unsigned long)totalT, dfStr.data, connCount);
+                         (unsigned long)totalT, cacheDfStr.data, connCount);
     }
-    if (statOut != NULL) {
-        appendStringInfoString(statOut, stat.data);
+    if (statOut != NULL && positiveDfCount > 0) {
+        appendStringInfo(statOut, "N=%lu;T=%lu;%s", (unsigned long)totalN,
+                         (unsigned long)totalT, positiveDfStr.data);
+    }
+    if (cacheStatOut != NULL) {
+        appendStringInfo(cacheStatOut, "N=%lu;T=%lu;%s", (unsigned long)totalN,
+                         (unsigned long)totalT, cacheDfStr.data);
     }
 
-    pfree(stat.data);
-    pfree(dfStr.data);
+    pfree(cacheDfStr.data);
+    pfree(positiveDfStr.data);
     pfree(dfEntries);
     pfree(sql.data);
     pfree(conns);
@@ -1076,8 +1069,9 @@ Datum bm25_collect_global_stat(PG_FUNCTION_ARGS)
     StringInfoData stat;
     initStringInfo(&summary);
     initStringInfo(&stat);
-    if (!Bm25CollectGlobalStatInternal(queryStr, tableName, columnName, NULL,
-                                       &summary, &stat)) {
+    if (!Bm25CollectGlobalStatInternal(queryStr, tableName, columnName, NULL, &summary,
+                                       &stat, NULL) ||
+        stat.len == 0) {
         pfree(queryStr);
         pfree(tableName);
         pfree_ext(columnName);
@@ -1139,8 +1133,8 @@ static bool Bm25QueryInfoWalker(Node* node, Bm25QueryInfo* queryInfo)
                 con = (Const*)strippedLeft;
                 var = (Var*)strippedRight;
             }
-            if (con != NULL && var != NULL && var->varattno > 0 &&
-                !con->constisnull && con->consttype == TEXTOID) {
+            if (con != NULL && var != NULL && var->varattno > 0 && !con->constisnull &&
+                con->consttype == TEXTOID) {
                 char* queryText = text_to_cstring(DatumGetTextPP(con->constvalue));
                 if (queryInfo->queryText == NULL) {
                     queryInfo->queryText = queryText;
@@ -1245,7 +1239,9 @@ void TryCollectBm25GlobalStat(QueryDesc* queryDesc)
         return;
     }
     if (queryInfo.queryText == NULL) {
-        ereport(DEBUG1, (errmsg("bm25 auto-collect: no <&> column/const pair found in job query")));
+        ereport(
+            DEBUG1,
+            (errmsg("bm25 auto-collect: no <&> column/const pair found in job query")));
         return;
     }
 
@@ -1264,7 +1260,8 @@ void TryCollectBm25GlobalStat(QueryDesc* queryDesc)
             distributedPlan->workerJob->jobQuery->rtable, queryInfo.varno - 1);
         if (workerRte != NULL && workerRte->eref != NULL &&
             logicalAttnum <= list_length(workerRte->eref->colnames)) {
-            Value* columnValue = (Value*)list_nth(workerRte->eref->colnames, logicalAttnum - 1);
+            Value* columnValue =
+                (Value*)list_nth(workerRte->eref->colnames, logicalAttnum - 1);
             if (columnValue != NULL && IsA(columnValue, String)) {
                 logicalAttnum = get_attnum(relationOid, strVal(columnValue));
             }
@@ -1280,47 +1277,71 @@ void TryCollectBm25GlobalStat(QueryDesc* queryDesc)
     }
 
     int termCount = 0;
-    char** terms =
-        Bm25TokenizeQueryForCache(relationOid, logicalAttnum, queryInfo.queryText,
-                                  &termCount);
+    char** terms = Bm25TokenizeQueryForCache(relationOid, logicalAttnum,
+                                             queryInfo.queryText, &termCount);
     if (terms == NULL) {
         pfree(queryInfo.queryText);
         return;
     }
 
     char* cachedStat = NULL;
-    if (Bm25GlobalStatCacheLookup(
-            u_sess->proc_cxt.MyDatabaseId, relationOid, logicalAttnum,
-            const_cast<const char* const*>(terms), termCount, &cachedStat)) {
+    bool cacheHit = Bm25GlobalStatCacheLookup(
+        u_sess->proc_cxt.MyDatabaseId, relationOid, logicalAttnum,
+        const_cast<const char* const*>(terms), termCount, &cachedStat);
+    if (cacheHit && cachedStat != NULL) {
+        ereport(DEBUG1, (errmsg("bm25 auto-collect: cache hit for query text \"%s\" "
+                                "(table %s, column %s)",
+                                queryInfo.queryText, tableName, columnName)));
         Bm25SetQueryPrefix(cachedStat);
         pfree(cachedStat);
         Bm25FreeTerms(terms, termCount);
         pfree(queryInfo.queryText);
         return;
     }
+    if (cacheHit) {
+        ereport(DEBUG1,
+                (errmsg("bm25 auto-collect: negative cache hit for query text \"%s\" "
+                        "(table %s, column %s), keeping local IDF",
+                        queryInfo.queryText, tableName, columnName)));
+        Bm25FreeTerms(terms, termCount);
+        pfree(queryInfo.queryText);
+        return;
+    }
 
-    ereport(DEBUG1,
-            (errmsg("bm25 auto-collect: collecting for query text \"%s\" (table %s, column %s)",
-                    queryInfo.queryText, tableName, columnName)));
+    ereport(
+        DEBUG1,
+        (errmsg(
+            "bm25 auto-collect: collecting for query text \"%s\" (table %s, column %s)",
+            queryInfo.queryText, tableName, columnName)));
     StringInfoData stat;
+    StringInfoData cacheStat;
     initStringInfo(&stat);
+    initStringInfo(&cacheStat);
     PG_TRY();
     {
         if (Bm25CollectGlobalStatInternal(queryInfo.queryText, tableName, columnName,
-                                          schemaName, NULL, &stat)) {
-            Bm25SetQueryPrefix(stat.data);
+                                          schemaName, NULL, &stat, &cacheStat)) {
             Bm25GlobalStatCacheStore(u_sess->proc_cxt.MyDatabaseId, relationOid,
-                                     logicalAttnum, stat.data);
+                                     logicalAttnum, cacheStat.data);
+            if (stat.len > 0) {
+                Bm25SetQueryPrefix(stat.data);
+            } else {
+                ereport(DEBUG1,
+                        (errmsg("bm25 auto-collect: all collected terms have zero "
+                                "document frequency, keeping local IDF")));
+            }
         }
     }
     PG_CATCH();
     {
+        pfree(cacheStat.data);
         pfree(stat.data);
         Bm25FreeTerms(terms, termCount);
         pfree(queryInfo.queryText);
         PG_RE_THROW();
     }
     PG_END_TRY();
+    pfree(cacheStat.data);
     pfree(stat.data);
     Bm25FreeTerms(terms, termCount);
     pfree(queryInfo.queryText);
