@@ -71,7 +71,12 @@ void InitializeBm25GlobalStatCache(void)
 
 static uint32 Bm25GlobalStatKeyHash(const Bm25GlobalStatKey* key)
 {
-    return hash_any(reinterpret_cast<const unsigned char*>(key), sizeof(*key));
+    const uint32 keyFields[] = {
+        static_cast<uint32>(key->databaseOid),
+        static_cast<uint32>(key->relationOid),
+        static_cast<uint32>(key->columnAttnum),
+    };
+    return hash_any(reinterpret_cast<const unsigned char*>(keyFields), sizeof(keyFields));
 }
 
 static bool Bm25GlobalStatKeyEquals(const Bm25GlobalStatKey* left,
@@ -85,16 +90,16 @@ static bool Bm25GlobalStatKeyEquals(const Bm25GlobalStatKey* left,
 template <typename Entry>
 static bool Bm25CacheReadStable(const Entry* source, Entry* snapshot)
 {
-    uint64 before = pg_atomic_barrier_read_u64(
-        const_cast<pg_atomic_uint64*>(&source->version));
+    uint64 before =
+        pg_atomic_barrier_read_u64(const_cast<pg_atomic_uint64*>(&source->version));
     if (before == 0 || (before & 1) != 0) {
         return false;
     }
     errno_t rc = memcpy_s(snapshot, sizeof(*snapshot), source, sizeof(*source));
     securec_check(rc, "\0", "\0");
     pg_read_barrier();
-    uint64 after = pg_atomic_barrier_read_u64(
-        const_cast<pg_atomic_uint64*>(&source->version));
+    uint64 after =
+        pg_atomic_barrier_read_u64(const_cast<pg_atomic_uint64*>(&source->version));
     return before == after && (after & 1) == 0;
 }
 
@@ -116,9 +121,8 @@ static bool Bm25CacheTryWrite(Entry* target, const Entry* value)
     return true;
 }
 
-static bool Bm25GlobalStatCacheRead(const Bm25GlobalStatKey* key,
-                                    TimestampTz now, uint64* documentCount,
-                                    uint64* tokenCount)
+static bool Bm25GlobalStatCacheRead(const Bm25GlobalStatKey* key, TimestampTz now,
+                                    uint64* documentCount, uint64* tokenCount)
 {
     uint32 bucket = Bm25GlobalStatKeyHash(key) & (BM25_STAT_CACHE_BUCKET_COUNT - 1);
     int64 ttl = static_cast<int64>(Bm25GlobalStatCacheTtlSeconds) * USECS_PER_SEC;
@@ -127,8 +131,8 @@ static bool Bm25GlobalStatCacheRead(const Bm25GlobalStatKey* key,
         Bm25GlobalStatEntry* entry =
             &g_bm25GlobalStatCache[bucket * BM25_CACHE_ASSOCIATIVITY + way];
         if (Bm25CacheReadStable(entry, &snapshot) &&
-            Bm25GlobalStatKeyEquals(&snapshot.key, key) &&
-            snapshot.documentCount > 0 && snapshot.tokenCount >= snapshot.documentCount &&
+            Bm25GlobalStatKeyEquals(&snapshot.key, key) && snapshot.documentCount > 0 &&
+            snapshot.tokenCount >= snapshot.documentCount &&
             now - snapshot.updatedAt <= ttl) {
             *documentCount = snapshot.documentCount;
             *tokenCount = snapshot.tokenCount;
@@ -141,19 +145,18 @@ static bool Bm25GlobalStatCacheRead(const Bm25GlobalStatKey* key,
 static bool Bm25GlobalTermCacheRead(const Bm25GlobalStatKey* key, const char* term,
                                     TimestampTz now, uint64* documentFrequency)
 {
-    uint32 termHash = hash_any(reinterpret_cast<const unsigned char*>(term), strlen(term));
-    uint32 bucket = (Bm25GlobalStatKeyHash(key) ^ termHash) &
-                    (BM25_TERM_CACHE_BUCKET_COUNT - 1);
+    uint32 termHash =
+        hash_any(reinterpret_cast<const unsigned char*>(term), strlen(term));
+    uint32 bucket =
+        (Bm25GlobalStatKeyHash(key) ^ termHash) & (BM25_TERM_CACHE_BUCKET_COUNT - 1);
     int64 ttl = static_cast<int64>(Bm25GlobalStatCacheTtlSeconds) * USECS_PER_SEC;
     for (uint32 way = 0; way < BM25_CACHE_ASSOCIATIVITY; ++way) {
         Bm25GlobalTermEntry snapshot;
         Bm25GlobalTermEntry* entry =
             &g_bm25GlobalTermCache[bucket * BM25_CACHE_ASSOCIATIVITY + way];
-        if (Bm25CacheReadStable(entry, &snapshot) &&
-            snapshot.termHash == termHash &&
+        if (Bm25CacheReadStable(entry, &snapshot) && snapshot.termHash == termHash &&
             Bm25GlobalStatKeyEquals(&snapshot.key, key) &&
             strncmp(snapshot.term, term, sizeof(snapshot.term)) == 0 &&
-            snapshot.documentFrequency > 0 &&
             now - snapshot.updatedAt <= ttl) {
             *documentFrequency = snapshot.documentFrequency;
             return true;
@@ -162,11 +165,14 @@ static bool Bm25GlobalTermCacheRead(const Bm25GlobalStatKey* key, const char* te
     return false;
 }
 
-bool Bm25GlobalStatCacheLookup(Oid databaseOid, Oid relationOid,
-                               AttrNumber columnAttnum,
-                               const char* const* terms, int termCount,
-                               char** statOut)
+bool Bm25GlobalStatCacheLookup(Oid databaseOid, Oid relationOid, AttrNumber columnAttnum,
+                               const char* const* terms, int termCount, char** statOut)
 {
+    /*
+     * A true return with a NULL statOut is a negative cache hit: every requested
+     * term was collected and had df=0. The caller keeps Local IDF without repeating
+     * distributed collection or constructing an invalid term:0 payload.
+     */
     InitializeBm25GlobalStatCache();
     *statOut = NULL;
     if (terms == NULL || termCount <= 0) {
@@ -185,6 +191,7 @@ bool Bm25GlobalStatCacheLookup(Oid databaseOid, Oid relationOid,
     initStringInfo(&stat);
     appendStringInfo(&stat, "N=%lu;T=%lu;", (unsigned long)documentCount,
                      (unsigned long)tokenCount);
+    int positiveTermCount = 0;
     for (int index = 0; index < termCount; ++index) {
         uint64 documentFrequency = 0;
         if (!Bm25GlobalTermCacheRead(&key, terms[index], now, &documentFrequency)) {
@@ -195,15 +202,22 @@ bool Bm25GlobalStatCacheLookup(Oid databaseOid, Oid relationOid,
             pfree(stat.data);
             return false;
         }
-        appendStringInfo(&stat, "%s%s:%lu", index == 0 ? "" : ",", terms[index],
-                         (unsigned long)documentFrequency);
+        if (documentFrequency == 0) {
+            continue;
+        }
+        appendStringInfo(&stat, "%s%s:%lu", positiveTermCount == 0 ? "" : ",",
+                         terms[index], (unsigned long)documentFrequency);
+        positiveTermCount++;
+    }
+    if (positiveTermCount == 0) {
+        pfree(stat.data);
+        return true;
     }
     *statOut = stat.data;
     return true;
 }
 
-static Bm25GlobalStatEntry* Bm25GlobalStatCacheChooseSlot(
-    const Bm25GlobalStatKey* key)
+static Bm25GlobalStatEntry* Bm25GlobalStatCacheChooseSlot(const Bm25GlobalStatKey* key)
 {
     uint32 bucket = Bm25GlobalStatKeyHash(key) & (BM25_STAT_CACHE_BUCKET_COUNT - 1);
     Bm25GlobalStatEntry* oldest = NULL;
@@ -229,11 +243,12 @@ static Bm25GlobalStatEntry* Bm25GlobalStatCacheChooseSlot(
     return oldest;
 }
 
-static Bm25GlobalTermEntry* Bm25GlobalTermCacheChooseSlot(
-    const Bm25GlobalStatKey* key, const char* term, uint32 termHash)
+static Bm25GlobalTermEntry* Bm25GlobalTermCacheChooseSlot(const Bm25GlobalStatKey* key,
+                                                          const char* term,
+                                                          uint32 termHash)
 {
-    uint32 bucket = (Bm25GlobalStatKeyHash(key) ^ termHash) &
-                    (BM25_TERM_CACHE_BUCKET_COUNT - 1);
+    uint32 bucket =
+        (Bm25GlobalStatKeyHash(key) ^ termHash) & (BM25_TERM_CACHE_BUCKET_COUNT - 1);
     Bm25GlobalTermEntry* oldest = NULL;
     TimestampTz oldestUpdatedAt = PG_INT64_MAX;
     for (uint32 way = 0; way < BM25_CACHE_ASSOCIATIVITY; ++way) {
@@ -279,8 +294,8 @@ static bool Bm25GlobalStatParseUnsigned(const char* value, uint64* parsed)
     return true;
 }
 
-void Bm25GlobalStatCacheStore(Oid databaseOid, Oid relationOid,
-                              AttrNumber columnAttnum, const char* stat)
+void Bm25GlobalStatCacheStore(Oid databaseOid, Oid relationOid, AttrNumber columnAttnum,
+                              const char* stat)
 {
     InitializeBm25GlobalStatCache();
     if (stat == NULL || stat[0] == '\0') {
@@ -298,11 +313,10 @@ void Bm25GlobalStatCacheStore(Oid databaseOid, Oid relationOid,
     *secondSemi = '\0';
     uint64 documentCount = 0;
     uint64 tokenCount = 0;
-    if (strncmp(buffer, "N=", 2) != 0 ||
-        strncmp(firstSemi + 1, "T=", 2) != 0 ||
+    if (strncmp(buffer, "N=", 2) != 0 || strncmp(firstSemi + 1, "T=", 2) != 0 ||
         !Bm25GlobalStatParseUnsigned(buffer + 2, &documentCount) ||
-        !Bm25GlobalStatParseUnsigned(firstSemi + 3, &tokenCount) ||
-        documentCount == 0 || tokenCount < documentCount) {
+        !Bm25GlobalStatParseUnsigned(firstSemi + 3, &tokenCount) || documentCount == 0 ||
+        tokenCount < documentCount) {
         pfree(buffer);
         return;
     }
@@ -320,8 +334,8 @@ void Bm25GlobalStatCacheStore(Oid databaseOid, Oid relationOid,
     }
 
     char* pairContext = NULL;
-    for (char* pair = strtok_r(secondSemi + 1, ",", &pairContext);
-         pair != NULL; pair = strtok_r(NULL, ",", &pairContext)) {
+    for (char* pair = strtok_r(secondSemi + 1, ",", &pairContext); pair != NULL;
+         pair = strtok_r(NULL, ",", &pairContext)) {
         char* colon = strchr(pair, ':');
         if (colon == NULL || colon == pair) {
             continue;
@@ -330,7 +344,7 @@ void Bm25GlobalStatCacheStore(Oid databaseOid, Oid relationOid,
         uint64 documentFrequency = 0;
         if (strlen(pair) >= BM25_GLOBAL_STAT_TERM_LEN ||
             !Bm25GlobalStatParseUnsigned(colon + 1, &documentFrequency) ||
-            documentFrequency == 0 || documentFrequency > documentCount) {
+            documentFrequency > documentCount) {
             continue;
         }
         uint32 termHash =
