@@ -51,6 +51,16 @@
 
 #include "pg_version_constants.h"
 
+/*
+ * ErrorIfOnConflictNotSupported compiles its ON CONFLICT checks conditionally.
+ * Assert the macro is present instead of letting an undefined name evaluate to 0,
+ * which would silently skip those checks. See Makefile.global.in for why it is
+ * passed as -DOPENGAUSS_VERSION_NUM rather than read from spq_config.h.
+ */
+#ifndef OPENGAUSS_VERSION_NUM
+#error "OPENGAUSS_VERSION_NUM is not defined, re-run configure to refresh Makefile.global"
+#endif
+
 #include "distributed/citus_clauses.h"
 #include "distributed/citus_nodefuncs.h"
 #include "distributed/citus_nodes.h"
@@ -1015,33 +1025,106 @@ DeferredErrorMessage* ErrorIfOnConflictNotSupported(Query* queryTree)
         return NULL;
     }
 #endif
-    if (commandType != CMD_INSERT) {
+    if (commandType != CMD_INSERT || queryTree->upsertClause == NULL ||
+        queryTree->upsertClause->upsertAction == UPSERT_NONE) {
         return NULL;
     }
+
+    UpsertExpr* upsertClause = queryTree->upsertClause;
+    bool isUpdateAction = upsertClause->upsertAction == UPSERT_UPDATE;
+#if OPENGAUSS_VERSION_NUM >= 70000
+    bool isOnConflictAction = upsertClause->upsertAction == ONCONFLICT_NOTHING ||
+                              upsertClause->upsertAction == ONCONFLICT_UPDATE;
+    isUpdateAction = isUpdateAction || upsertClause->upsertAction == ONCONFLICT_UPDATE;
+#endif
+
+    if (isUpdateAction) {
+        Oid distributedTableId = ExtractFirstCitusTableId(queryTree);
+        Var* partitionColumn = PartitionColumn(distributedTableId, rangeTableId);
+        Oid resultRelationId = ModifyQueryResultRelationId(queryTree);
+        const char* upsertClauseName = (upsertClause->upsertAction == UPSERT_UPDATE)
+                                           ? "ON DUPLICATE KEY UPDATE"
+                                           : "ON CONFLICT DO UPDATE";
+
+        foreach (setTargetCell, upsertClause->updateTlist) {
+            TargetEntry* setTargetEntry = (TargetEntry*)lfirst(setTargetCell);
+
+            if (setTargetEntry->resjunk) {
+                continue;
+            }
+
+            if (partitionColumn != NULL && setTargetEntry->resname != NULL) {
+                AttrNumber targetColumnAttrNumber =
+                    get_attnum(resultRelationId, setTargetEntry->resname);
+
+                if (targetColumnAttrNumber == partitionColumn->varattno) {
+                    Expr* setExpr = setTargetEntry->expr;
+                    bool assignsCurrentPartitionValue = false;
+
+                    if (IsA(setExpr, Var)) {
+                        Var* setVar = (Var*)setExpr;
+                        assignsCurrentPartitionValue =
+                            setVar->varlevelsup == 0 &&
+                            setVar->varno == queryTree->resultRelation &&
+                            setVar->varattno == partitionColumn->varattno;
+                    }
+
+                    if (!assignsCurrentPartitionValue) {
+                        specifiesPartitionValue = true;
+                    }
+                }
+            }
+
+            if (contain_mutable_functions((Node*)setTargetEntry->expr)) {
+                return DeferredError(
+                    ERRCODE_FEATURE_NOT_SUPPORTED,
+                    psprintf("functions used in the %s "
+                             "clause of INSERTs on distributed tables must "
+                             "be marked IMMUTABLE",
+                             upsertClauseName),
+                    NULL, NULL);
+            }
+        }
+
+        if (contain_mutable_functions(upsertClause->upsertWhere)) {
+            return DeferredError(
+                ERRCODE_FEATURE_NOT_SUPPORTED,
+                psprintf("functions used in the WHERE clause of "
+                         "%s on distributed tables must be marked IMMUTABLE",
+                         upsertClauseName),
+                NULL, NULL);
+        }
+
+        if (specifiesPartitionValue) {
+            return DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
+                                 "modifying the partition value of rows is not "
+                                 "allowed",
+                                 NULL, NULL);
+        }
+    }
+
+#if OPENGAUSS_VERSION_NUM >= 70000
+    if (isOnConflictAction && contain_mutable_functions(upsertClause->arbiterWhere)) {
+        return DeferredError(
+            ERRCODE_FEATURE_NOT_SUPPORTED,
+            "functions used in the WHERE clause of the ON CONFLICT clause of "
+            "INSERTs on distributed tables must be marked IMMUTABLE",
+            NULL, NULL);
+    }
+#endif
+
+#ifdef DISABLE_OG_COMMENTS
+    /* Original Citus ON CONFLICT handling (PostgreSQL style) */
     Oid distributedTableId = ExtractFirstCitusTableId(queryTree);
     Var* partitionColumn = PartitionColumn(distributedTableId, rangeTableId);
-#ifdef DISABLE_OG_COMMENTS
     List* onConflictSet = queryTree->onConflict->onConflictSet;
     Node* arbiterWhere = queryTree->onConflict->arbiterWhere;
     Node* onConflictWhere = queryTree->onConflict->onConflictWhere;
-#endif
-    List* onConflictSet = NIL;
-    Node* arbiterWhere = NULL;
-    Node* onConflictWhere = NULL;
-    /*
-     * onConflictSet is expanded via expand_targetlist() on the standard planner.
-     * This ends up adding all the columns to the onConflictSet even if the user
-     * does not explicitly state the columns in the query.
-     *
-     * The following loop simply allows "DO UPDATE SET part_col = table.part_col"
-     * types of elements in the target list, which are added by expand_targetlist().
-     * Any other attempt to update partition column value is forbidden.
-     */
+
     foreach (setTargetCell, onConflictSet) {
         TargetEntry* setTargetEntry = (TargetEntry*)lfirst(setTargetCell);
         bool setTargetEntryPartitionColumn = false;
 
-        /* reference tables do not have partition column */
         if (partitionColumn == NULL) {
             setTargetEntryPartitionColumn = false;
         } else {
@@ -1065,11 +1148,6 @@ DeferredErrorMessage* ErrorIfOnConflictNotSupported(Query* queryTree)
                 specifiesPartitionValue = true;
             }
         } else {
-            /*
-             * Similarly, allow  "DO UPDATE SET col_1 = table.col_1" types of
-             * target list elements. Note that, the following check allows
-             * "DO UPDATE SET col_1 = table.col_2", which is not harmful.
-             */
             if (IsA(setTargetEntry->expr, Var)) {
                 continue;
             } else if (contain_mutable_functions((Node*)setTargetEntry->expr)) {
@@ -1082,7 +1160,6 @@ DeferredErrorMessage* ErrorIfOnConflictNotSupported(Query* queryTree)
         }
     }
 
-    /* error if either arbiter or on conflict WHERE contains a mutable function */
     if (contain_mutable_functions((Node*)arbiterWhere) ||
         contain_mutable_functions((Node*)onConflictWhere)) {
         return DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -1098,6 +1175,7 @@ DeferredErrorMessage* ErrorIfOnConflictNotSupported(Query* queryTree)
                              "allowed",
                              NULL, NULL);
     }
+#endif
 
     return NULL;
 }

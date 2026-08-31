@@ -1,0 +1,6 @@
+# Tests for features that only exist on openGauss 7.0 and newer.
+#
+# This schedule runs after spq_schedule and reuses the cluster it sets up.
+# It is only passed to pg_regress when OPENGAUSS_VERSION_NUM >= 70000; see
+# SPQ_VERSION_SPECIFIC_SCHEDULE in src/test/regress/Makefile.
+test: spq_on_conflict

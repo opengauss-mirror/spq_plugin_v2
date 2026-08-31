@@ -46,6 +46,14 @@ endif
 
 MULTI_REGRESS_OPTS = --inputdir=$(spq_abs_srcdir) $(pg_regress_locale_flags)
 
+# Version-gated tests live in their own schedule file rather than being spelled
+# out on the pg_regress command line, so that they stay greppable from the
+# schedule. pg_regress accepts --schedule more than once and runs them in order.
+SPQ_VERSION_SPECIFIC_SCHEDULE =
+ifeq ($(shell test "$(OPENGAUSS_VERSION_NUM)" -ge 70000 && echo yes),yes)
+SPQ_VERSION_SPECIFIC_SCHEDULE += --schedule=$(spq_abs_srcdir)/spq_og7_schedule
+endif
+
 pg_upgrade_check = $(spq_abs_srcdir)/citus_tests/upgrade/pg_upgrade_test.py
 citus_upgrade_check =CITUS_OLD_VERSION=$(citus-old-version) $(spq_abs_srcdir)/citus_tests/upgrade/citus_upgrade_test.py
 arbitrary_config_check = $(spq_abs_srcdir)/citus_tests/arbitrary_configs/citus_arbitrary_configs.py
@@ -169,7 +177,8 @@ check-empty: all
 check-spq: all
 	@cp -rf $(spq_abs_srcdir)/data $(spq_top_builddir)/$(spq_subdir)/
 	$(pg_regress_multi_check) --load-extension=spq \
-	-- $(MULTI_REGRESS_OPTS) --schedule=$(spq_abs_srcdir)/spq_schedule $(EXTRA_TESTS)
+	-- $(MULTI_REGRESS_OPTS) --schedule=$(spq_abs_srcdir)/spq_schedule \
+	$(SPQ_VERSION_SPECIFIC_SCHEDULE) $(EXTRA_TESTS)
 
 check-multi: all
 	$(pg_regress_multi_check) --load-extension=spq \

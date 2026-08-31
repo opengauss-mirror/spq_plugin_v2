@@ -163,7 +163,7 @@ void AddInsertAliasIfNeeded(Query* query)
 #ifdef DISABLE_OG_COMMENTS
         query->onConflict == NULL &&
 #endif
-        ExtractDistributedInsertValuesRTE(query) == NULL) {
+        query->upsertClause == NULL && ExtractDistributedInsertValuesRTE(query) == NULL) {
         /* simple single-row insert does not need an alias */
         return;
     }

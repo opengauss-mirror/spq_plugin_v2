@@ -20,6 +20,17 @@
 
 #include "postgres.h"
 
+/*
+ * The ON CONFLICT deparse paths below are compiled conditionally. Assert the
+ * macro is present instead of letting an undefined name evaluate to 0, which
+ * would silently deparse ON CONFLICT as ON DUPLICATE KEY UPDATE. It arrives via
+ * -DOPENGAUSS_VERSION_NUM from Makefile.global; spq_config.h cannot be included
+ * here because its SPQ_VERSION_NUM collides with openGauss' miscadmin.h.
+ */
+#ifndef OPENGAUSS_VERSION_NUM
+#error "OPENGAUSS_VERSION_NUM is not defined, re-run configure to refresh Makefile.global"
+#endif
+
 #include <ctype.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -51,6 +62,7 @@
 #include "distributed/commands.h"
 #include "distributed/multi_router_planner.h"
 #include "distributed/namespace_utils.h"
+#include "distributed/relay_utility.h"
 #include "distributed/listutils.h"
 #include "executor/spi.h"
 #include "foreign/foreign.h"
@@ -61,6 +73,7 @@
 #include "nodes/nodeFuncs.h"
 #include "nodes/relation.h"
 #include "nodes/pg_list.h"
+#include "optimizer/clauses.h"
 #include "optimizer/planner.h"
 #include "optimizer/tlist.h"
 #include "parser/parse_node.h"
@@ -3017,14 +3030,153 @@ static void get_insert_query_def(Query* query, deparse_context* context,
         appendStringInfoString(buf, "DEFAULT VALUES");
     }
 
-    /* for MERGE INTO  statement for UPSERT, add ON DUPLICATE KEY UPDATE expression */
+    /*
+     * for MERGE INTO statement for UPSERT, add ON DUPLICATE KEY UPDATE expression.
+     *
+     * Only a single unconditional UPDATE action maps onto ON DUPLICATE KEY UPDATE.
+     * Reject anything else rather than emitting SQL that silently drops actions or
+     * concatenates several SET lists without a separator.
+     */
     if (query->mergeActionList) {
-        ereport(ERROR, (errmsg("upsertClause is not supported now. ")));
+        MergeAction* updateAction = NULL;
+
+        foreach (l, query->mergeActionList) {
+            MergeAction* mergeAction = (MergeAction*)lfirst(l);
+
+            if (mergeAction->commandType == CMD_INSERT) {
+                continue;
+            }
+
+            if (mergeAction->commandType != CMD_UPDATE) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                         errmsg("unsupported action in the upsert action list of an "
+                                "INSERT on a distributed table")));
+            }
+
+            if (updateAction != NULL) {
+                ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                                errmsg("upsert with more than one UPDATE action is not "
+                                       "supported on distributed tables")));
+            }
+
+            if (mergeAction->qual != NULL) {
+                ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                                errmsg("upsert with a conditional UPDATE action is not "
+                                       "supported on distributed tables")));
+            }
+
+            updateAction = mergeAction;
+        }
+
+        appendStringInfoString(buf, " ON DUPLICATE KEY UPDATE ");
+        if (updateAction == NULL) {
+            appendStringInfoString(buf, "NOTHING");
+        } else {
+            get_update_query_targetlist_def(query, updateAction->targetList, context,
+                                            rte);
+        }
     }
 
-    /* for INSERT statement for UPSERT, add ON DUPLICATE KEY UPDATE expression */
+    /* for INSERT statement for UPSERT, add ON DUPLICATE KEY UPDATE or ON CONFLICT
+     * expression */
     if (query->upsertClause != NULL && query->upsertClause->upsertAction != UPSERT_NONE) {
-        ereport(ERROR, (errmsg("upsertClause is not supported now. ")));
+        UpsertExpr* upsertClause = query->upsertClause;
+#if OPENGAUSS_VERSION_NUM >= 70000
+        bool isOnConflict = (upsertClause->upsertAction == ONCONFLICT_NOTHING ||
+                             upsertClause->upsertAction == ONCONFLICT_UPDATE);
+        if (isOnConflict) {
+            appendStringInfoString(buf, " ON CONFLICT");
+
+            if (upsertClause->constraint != InvalidOid) {
+                char* conname = get_constraint_name(upsertClause->constraint);
+                if (conname != NULL) {
+                    if (context->shardid > 0) {
+                        AppendShardIdToName(&conname,
+                                            static_cast<uint64>(context->shardid));
+                    }
+                    appendStringInfo(buf, " ON CONSTRAINT %s", quote_identifier(conname));
+                    pfree(conname);
+                }
+            } else if (upsertClause->arbiterElems != NIL) {
+                appendStringInfoString(buf, " (");
+                ListCell* lc = NULL;
+                bool first = true;
+                foreach (lc, upsertClause->arbiterElems) {
+                    InferenceElem* elem = (InferenceElem*)lfirst(lc);
+                    if (!first) {
+                        appendStringInfoString(buf, ", ");
+                    }
+                    first = false;
+
+                    if (IsA(elem->expr, Var)) {
+                        Var* var = (Var*)elem->expr;
+                        RangeTblEntry* targetRte = rt_fetch(var->varno, query->rtable);
+                        char* attributeName =
+                            get_rte_attribute_name(targetRte, var->varattno);
+                        appendStringInfoString(buf, quote_identifier(attributeName));
+                    } else if (looks_like_function(elem->expr)) {
+                        get_rule_expr(elem->expr, context, false);
+                    } else {
+                        appendStringInfoChar(buf, '(');
+                        get_rule_expr(elem->expr, context, false);
+                        appendStringInfoChar(buf, ')');
+                    }
+
+                    if (OidIsValid(elem->infercollid)) {
+                        appendStringInfo(buf, " COLLATE %s",
+                                         generate_collation_name(elem->infercollid));
+                    }
+                    if (OidIsValid(elem->inferopclass)) {
+                        get_opclass_name(elem->inferopclass, InvalidOid, buf);
+                    }
+                }
+                appendStringInfoChar(buf, ')');
+
+                if (upsertClause->arbiterWhere != NULL) {
+                    appendStringInfoString(buf, " WHERE ");
+                    get_rule_expr(upsertClause->arbiterWhere, context, false);
+                }
+            }
+
+            if (upsertClause->upsertAction == ONCONFLICT_NOTHING) {
+                appendStringInfoString(buf, " DO NOTHING");
+            } else {
+                appendStringInfoString(buf, " DO UPDATE SET ");
+                get_update_query_targetlist_def(query, upsertClause->updateTlist, context,
+                                                rte);
+                if (upsertClause->upsertWhere != NULL) {
+                    appendContextKeyword(context, " WHERE ", PRETTYINDENT_STD,
+                                         PRETTYINDENT_STD, 1);
+                    if (IsA(upsertClause->upsertWhere, List)) {
+                        Expr* expr = make_ands_explicit((List*)upsertClause->upsertWhere);
+                        get_rule_expr((Node*)expr, context, false);
+                    } else {
+                        get_rule_expr(upsertClause->upsertWhere, context, false);
+                    }
+                }
+            }
+        } else
+#endif
+        {
+            appendStringInfoString(buf, " ON DUPLICATE KEY UPDATE ");
+            if (upsertClause->upsertAction == UPSERT_NOTHING) {
+                appendStringInfoString(buf, "NOTHING");
+            } else {
+                get_update_query_targetlist_def(query, upsertClause->updateTlist, context,
+                                                rte);
+                if (upsertClause->upsertWhere != NULL) {
+                    appendContextKeyword(context, " WHERE ", PRETTYINDENT_STD,
+                                         PRETTYINDENT_STD, 1);
+                    if (IsA(upsertClause->upsertWhere, List)) {
+                        Expr* expr = make_ands_explicit((List*)upsertClause->upsertWhere);
+                        get_rule_expr((Node*)expr, context, false);
+                    } else {
+                        get_rule_expr(upsertClause->upsertWhere, context, false);
+                    }
+                }
+            }
+        }
     }
 
     /* Add RETURNING if present */

@@ -1,0 +1,113 @@
+-- Test ON CONFLICT on distributed tables (requires openGauss 7.0+)
+
+CREATE SCHEMA test_on_conflict;
+SET search_path TO test_on_conflict;
+SET spq.shard_count TO 2;
+
+CREATE TABLE conflict_basic(
+    id INT PRIMARY KEY,
+    name TEXT NOT NULL,
+    val INT DEFAULT 0
+);
+
+SELECT create_distributed_table('conflict_basic', 'id');
+
+INSERT INTO conflict_basic VALUES(1, 'Alice', 10), (2, 'Bob', 20), (3, 'Charlie', 30);
+SELECT * FROM conflict_basic ORDER BY id;
+
+-- DO NOTHING supports both targeted and target-free forms
+INSERT INTO conflict_basic VALUES(4, 'Dave', 40) ON CONFLICT (id) DO NOTHING;
+INSERT INTO conflict_basic VALUES(1, 'ignored', 100) ON CONFLICT DO NOTHING;
+SELECT * FROM conflict_basic ORDER BY id;
+
+-- ON CONSTRAINT must reference the shard constraint name on workers
+INSERT INTO conflict_basic VALUES(1, 'Alice_constraint', 101)
+    ON CONFLICT ON CONSTRAINT conflict_basic_pkey
+    DO UPDATE SET name = EXCLUDED.name, val = EXCLUDED.val;
+
+-- Constant and EXCLUDED assignments
+INSERT INTO conflict_basic VALUES(1, 'Alice_new', 999)
+    ON CONFLICT (id) DO UPDATE SET name = 'Alice_updated', val = 99;
+INSERT INTO conflict_basic VALUES(2, 'Bob_new', 200)
+    ON CONFLICT (id) DO UPDATE SET val = EXCLUDED.val;
+SELECT * FROM conflict_basic ORDER BY id;
+
+-- Multi-row routing across shards
+INSERT INTO conflict_basic VALUES(1, 'A', 1000), (5, 'Eve', 50)
+    ON CONFLICT (id) DO UPDATE SET val = EXCLUDED.val;
+SELECT * FROM conflict_basic ORDER BY id;
+
+-- Target-table references, aliases, EXCLUDED, WHERE and RETURNING
+INSERT INTO conflict_basic VALUES(3, 'Charlie2', 100)
+    ON CONFLICT (id) DO UPDATE SET val = conflict_basic.val + 70;
+INSERT INTO conflict_basic AS target VALUES(3, 'Charlie3', 7)
+    ON CONFLICT (id) DO UPDATE SET val = target.val + EXCLUDED.val
+    WHERE target.val < 500
+    RETURNING id, val;
+SELECT * FROM conflict_basic ORDER BY id;
+
+-- Target-table self-assignment is safe, but other distribution-column updates fail
+INSERT INTO conflict_basic AS target VALUES(1, 'test', 0)
+    ON CONFLICT (id) DO UPDATE SET id = target.id;
+INSERT INTO conflict_basic VALUES(1, 'test', 0)
+    ON CONFLICT (id) DO UPDATE SET id = 100;
+INSERT INTO conflict_basic VALUES(1, 'test', 0)
+    ON CONFLICT (id) DO UPDATE SET id = EXCLUDED.id;
+
+-- Mutable functions are rejected in SET, update WHERE and arbiter WHERE
+INSERT INTO conflict_basic VALUES(1, 'test', 0)
+    ON CONFLICT (id) DO UPDATE SET val = random() * 100;
+INSERT INTO conflict_basic VALUES(1, 'test', 0)
+    ON CONFLICT (id) DO UPDATE SET val = 100
+    WHERE random() > -1;
+INSERT INTO conflict_basic VALUES(1, 'test', 0)
+    ON CONFLICT (id) WHERE random() > -1 DO NOTHING;
+
+-- Composite unique-key inference
+CREATE TABLE conflict_composite(
+    id INT,
+    name TEXT,
+    val INT DEFAULT 0,
+    UNIQUE(id, name)
+);
+
+SELECT create_distributed_table('conflict_composite', 'id');
+INSERT INTO conflict_composite VALUES(1, 'Alice', 10), (2, 'Bob', 20);
+INSERT INTO conflict_composite VALUES(1, 'Alice', 99)
+    ON CONFLICT (id, name) DO UPDATE SET val = EXCLUDED.val;
+INSERT INTO conflict_composite VALUES(1, 'Carol', 30)
+    ON CONFLICT (id, name) DO UPDATE SET val = 999;
+SELECT * FROM conflict_composite ORDER BY id, name;
+
+-- Expression and partial unique-index inference with explicit options
+CREATE TABLE conflict_inference(
+    id INT,
+    name TEXT,
+    active BOOLEAN NOT NULL,
+    val INT DEFAULT 0
+);
+
+CREATE UNIQUE INDEX conflict_inference_key
+    ON conflict_inference(id, lower(name) COLLATE "C.utf8" text_pattern_ops)
+    WHERE active;
+
+SELECT create_distributed_table('conflict_inference', 'id');
+INSERT INTO conflict_inference VALUES(1, 'Alice', true, 10);
+
+SET client_min_messages TO NOTICE;
+SET spq.log_remote_commands TO ON;
+SET spq.grep_remote_commands TO '%COLLATE%';
+
+INSERT INTO conflict_inference VALUES(1, 'ALICE', true, 20)
+    ON CONFLICT (id, lower(name) COLLATE "C.utf8" text_pattern_ops)
+    WHERE active
+    DO UPDATE SET val = EXCLUDED.val;
+
+RESET spq.grep_remote_commands;
+RESET spq.log_remote_commands;
+RESET client_min_messages;
+
+SELECT * FROM conflict_inference ORDER BY id, name;
+
+DROP SCHEMA test_on_conflict CASCADE;
+RESET SEARCH_PATH;
