@@ -28,6 +28,7 @@ test: spq_alter_role_propagation
 
 # testcase for table operation 
 test: spq_curd spq_copy spq_select_into spq_fast_route_test spq_unsupport_foreignkey
+test: spq_upsert
 test: spq_join
 test: spq_table_size
 

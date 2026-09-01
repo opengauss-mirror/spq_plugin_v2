@@ -88,6 +88,11 @@ override PGCFLAGS := $(shell $(PG_CONFIG) --cflags)
 override OG_THIRD_BIN_PATH := $(shell echo ${THIRD_BIN_PATH})
 override OG_CODE_BASE := $(shell echo ${CODE_BASE})
 override OPENGAUSS_VERSION_NUM := @OPENGAUSS_VERSION_NUM@
+# Passed on the command line rather than picked up from spq_config.h: that header
+# also defines SPQ_VERSION_NUM, which collides with the variable of the same name
+# declared by openGauss' miscadmin.h. Sources that test OPENGAUSS_VERSION_NUM
+# assert that it is defined, so a stale Makefile.global fails the build loudly.
+override CXXFLAGS += -DOPENGAUSS_VERSION_NUM=$(OPENGAUSS_VERSION_NUM)
 override THIRD_PARTY_INCLUDE := -I '$(OG_THIRD_BIN_PATH)/kernel/dependency/libobs/comm/include' \
 								-I '$(OG_THIRD_BIN_PATH)/kernel/dependency/openssl/comm/include'
 ifeq ($(shell test "$(OPENGAUSS_VERSION_NUM)" -ge 70000 && echo yes),yes)
