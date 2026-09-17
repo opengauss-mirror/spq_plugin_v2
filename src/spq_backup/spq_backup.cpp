@@ -277,7 +277,7 @@ void GenerateRecoveryConf(std::string path, char* endPtrStr)
 
 void BackupWorker::setRestorePoint(char* endPtrStr)
 {
-    int hi, lo;
+    uint32 hi, lo;
     if (sscanf_s(endPtrStr, "%X/%X", &hi, &lo) != 2) {
         pg_log(stderr, _("node %s setRestorePoint to %s failed\n"), nodeInfo.dbid.c_str(),
                endPtrStr == nullptr ? "" : endPtrStr);
