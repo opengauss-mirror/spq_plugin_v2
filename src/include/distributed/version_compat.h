@@ -40,7 +40,7 @@ static inline int128 NextvalInternalCompat(Oid sequenceId)
 #if OPENGAUSS_VERSION_NUM < 70000
     return nextval_internal(sequenceId);
 #else
-    return nextval_internal(sequenceId, true);
+    return nextval_internal(sequenceId, true, false);
 #endif
 }
 

@@ -38,6 +38,7 @@
 #include "optimizer/planner.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
+#include "parser/parse_oper.h"
 #include "parser/parse_relation.h"
 #include "parser/parse_type.h"
 #include "parser/parsetree.h"
@@ -50,6 +51,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "access/datavec/vector.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
@@ -173,8 +175,8 @@ static uint32 AnchorRangeTableId(List* rangeTableList);
 static List* BaseRangeTableIdList(List* rangeTableList);
 static List* AnchorRangeTableIdList(List* rangeTableList, List* baseRangeTableIdList);
 static void AdjustColumnOldAttributes(List* expressionList);
-static List* RangeTableFragmentsList(List* rangeTableList, List* whereClauseList,
-                                     List* dependentJobList);
+static List* RangeTableFragmentsList(Query* jobQuery, List* rangeTableList,
+                                     List* whereClauseList, List* dependentJobList);
 static OperatorCacheEntry* LookupOperatorByType(Oid typeId, Oid accessMethodId,
                                                 int16 strategyNumber);
 static Oid GetOperatorByType(Oid typeId, Oid accessMethodId, int16 strategyNumber);
@@ -2129,6 +2131,8 @@ static void ErrorIfUnsupportedShardDistribution(Query* query)
             rangeDistributedRelationCount++;
             nonReferenceRelations = lappend_oid(nonReferenceRelations, relationId);
         } else if (IsCitusTableType(relationId, HASH_DISTRIBUTED) ||
+                   IsCitusTableType(relationId, IVF_DISTRIBUTED) ||
+                   IsCitusTableType(relationId, HNSW_DISTRIBUTED) ||
                    IsCitusTableType(relationId, SINGLE_SHARD_DISTRIBUTED)) {
             hashDistOrSingleShardRelCount++;
             nonReferenceRelations = lappend_oid(nonReferenceRelations, relationId);
@@ -2392,8 +2396,8 @@ static List* SqlTaskList(Job* job)
      * We also apply partition pruning based on the selection criteria. If all
      * range table fragments are pruned away, we return an empty task list.
      */
-    List* rangeTableFragmentsList =
-        RangeTableFragmentsList(rangeTableList, whereClauseList, dependentJobList);
+    List* rangeTableFragmentsList = RangeTableFragmentsList(
+        jobQuery, rangeTableList, whereClauseList, dependentJobList);
     if (rangeTableFragmentsList == NIL) {
         return NIL;
     }
@@ -2654,6 +2658,187 @@ static void AdjustColumnOldAttributes(List* expressionList)
 #endif
 }
 
+typedef struct IvfPrunedShardDistance {
+    ShardInterval* shardInterval;
+    double distance;
+} IvfPrunedShardDistance;
+
+static int CompareIvfPrunedShardDistances(const void* leftElement,
+                                          const void* rightElement)
+{
+    const IvfPrunedShardDistance* left = (const IvfPrunedShardDistance*)leftElement;
+    const IvfPrunedShardDistance* right = (const IvfPrunedShardDistance*)rightElement;
+
+    if (left->distance < right->distance) {
+        return -1;
+    }
+    if (left->distance > right->distance) {
+        return 1;
+    }
+
+    if (left->shardInterval->shardId > right->shardInterval->shardId) {
+        return 1;
+    }
+    if (left->shardInterval->shardId < right->shardInterval->shardId) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static Node* StripRelabelNodes(Node* node)
+{
+    while (node != NULL && IsA(node, RelabelType)) {
+        node = (Node*)((RelabelType*)node)->arg;
+    }
+
+    return node;
+}
+
+static bool MatchesIvfPartitionColumn(Node* node, Index tableId,
+                                      CitusTableCacheEntry* cacheEntry)
+{
+    node = StripRelabelNodes(node);
+    if (node == NULL || !IsA(node, Var)) {
+        return false;
+    }
+
+    Var* var = (Var*)node;
+    return var->varno == tableId &&
+           var->varattno == cacheEntry->partitionColumn->varattno;
+}
+
+static Const* IvfOrderByQueryVectorConst(Query* jobQuery, Index tableId,
+                                         CitusTableCacheEntry* cacheEntry)
+{
+    if (jobQuery->sortClause == NIL) {
+        return NULL;
+    }
+
+    /*
+     * Nearest-center pruning only applies when ascending L2 distance is the
+     * primary sort key. Descending distance or a secondary distance key does
+     * not imply that the first rows belong to the nearest shards.
+     */
+    SortGroupClause* sortClause = (SortGroupClause*)linitial(jobQuery->sortClause);
+    TargetEntry* targetEntry = get_sortgroupclause_tle(sortClause, jobQuery->targetList);
+    Node* sortExpression = StripRelabelNodes((Node*)targetEntry->expr);
+
+    if (sortExpression == NULL || !IsA(sortExpression, OpExpr)) {
+        return NULL;
+    }
+
+    OpExpr* opExpr = (OpExpr*)sortExpression;
+    if (list_length(opExpr->args) != 2 || opExpr->opresulttype != FLOAT8OID) {
+        return NULL;
+    }
+
+    Oid ascendingSortOp = InvalidOid;
+    get_sort_group_operators(FLOAT8OID, true, false, false, &ascendingSortOp, NULL, NULL,
+                             NULL);
+    if (sortClause->sortop != ascendingSortOp) {
+        return NULL;
+    }
+
+    char* operatorName = get_opname(opExpr->opno);
+    if (operatorName == NULL || strcmp(operatorName, "<->") != 0) {
+        return NULL;
+    }
+
+    Node* leftArg = StripRelabelNodes((Node*)linitial(opExpr->args));
+    Node* rightArg = StripRelabelNodes((Node*)lsecond(opExpr->args));
+    bool leftMatches = MatchesIvfPartitionColumn(leftArg, tableId, cacheEntry);
+    bool rightMatches = MatchesIvfPartitionColumn(rightArg, tableId, cacheEntry);
+
+    if (leftMatches && IsA(rightArg, Const)) {
+        Const* queryVector = (Const*)rightArg;
+        if (!queryVector->constisnull && queryVector->consttype == VECTOROID) {
+            return queryVector;
+        }
+    } else if (rightMatches && IsA(leftArg, Const)) {
+        Const* queryVector = (Const*)leftArg;
+        if (!queryVector->constisnull && queryVector->consttype == VECTOROID) {
+            return queryVector;
+        }
+    }
+
+    return NULL;
+}
+
+static List* PruneIvfShardsForOrderByLimit(Oid relationId, Index tableId, Query* jobQuery,
+                                           List* shardIntervalList)
+{
+    CitusTableCacheEntry* cacheEntry = GetCitusTableCacheEntry(relationId);
+    Const* queryVectorConst = NULL;
+    Vector* queryVector = NULL;
+    IvfPrunedShardDistance* distances = NULL;
+    int shardCount = list_length(shardIntervalList);
+    int probes = 0;
+    int shardIndex = 0;
+    List* prunedShardIntervalList = NIL;
+
+    if ((!IsCitusTableTypeCacheEntry(cacheEntry, IVF_DISTRIBUTED) &&
+         !IsCitusTableTypeCacheEntry(cacheEntry, HNSW_DISTRIBUTED)) ||
+        jobQuery->limitCount == NULL || jobQuery->sortClause == NIL || shardCount == 0) {
+        return shardIntervalList;
+    }
+
+    if (IsCitusTableTypeCacheEntry(cacheEntry, HNSW_DISTRIBUTED)) {
+        probes = u_sess->datavec_ctx.hnsw_distributed_probes;
+    } else {
+        probes = u_sess->datavec_ctx.ivfflat_distributed_probes;
+    }
+
+    queryVectorConst = IvfOrderByQueryVectorConst(jobQuery, tableId, cacheEntry);
+    if (queryVectorConst == NULL) {
+        return shardIntervalList;
+    }
+
+    if (probes <= 0) {
+        probes = 1;
+    }
+    probes = Min(probes, shardCount);
+
+    queryVector = DatumGetVector(queryVectorConst->constvalue);
+    distances =
+        (IvfPrunedShardDistance*)palloc0(sizeof(IvfPrunedShardDistance) * shardCount);
+
+    ShardInterval* shardInterval = NULL;
+    foreach_declared_ptr(shardInterval, shardIntervalList)
+    {
+        if (!shardInterval->minValueExists) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                     errmsg("vector distributed shard " UINT64_FORMAT
+                            " has no distribution center",
+                            shardInterval->shardId),
+                     errdetail("Shard metadata in pg_dist_shard is inconsistent.")));
+        }
+
+        Vector* center = DatumGetVector(shardInterval->minValue);
+        if (center->dim != queryVector->dim) {
+            ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                            errmsg("vector distribution center dimension does not match "
+                                   "query vector dimension")));
+        }
+
+        distances[shardIndex].shardInterval = shardInterval;
+        distances[shardIndex].distance =
+            VectorL2SquaredDistance(queryVector->dim, center->x, queryVector->x);
+        shardIndex++;
+    }
+
+    qsort(distances, shardCount, sizeof(IvfPrunedShardDistance),
+          CompareIvfPrunedShardDistances);
+
+    for (int probeIndex = 0; probeIndex < probes; probeIndex++) {
+        prunedShardIntervalList =
+            lappend(prunedShardIntervalList, distances[probeIndex].shardInterval);
+    }
+
+    return prunedShardIntervalList;
+}
+
 /*
  * RangeTableFragmentsList walks over range tables in the given range table list
  * and for each table, the function creates a list of its fragments. A fragment
@@ -2662,8 +2847,8 @@ static void AdjustColumnOldAttributes(List* expressionList)
  * using the given where clause list. Then, the function appends the fragment
  * list for each range table to a list of lists, and returns this list of lists.
  */
-static List* RangeTableFragmentsList(List* rangeTableList, List* whereClauseList,
-                                     List* dependentJobList)
+static List* RangeTableFragmentsList(Query* jobQuery, List* rangeTableList,
+                                     List* whereClauseList, List* dependentJobList)
 {
     List* rangeTableFragmentsList = NIL;
     uint32 rangeTableIndex = 0;
@@ -2682,6 +2867,8 @@ static List* RangeTableFragmentsList(List* rangeTableList, List* whereClauseList
             List* shardFragmentList = NIL;
             List* prunedShardIntervalList =
                 PruneShards(relationId, tableId, whereClauseList, NULL);
+            prunedShardIntervalList = PruneIvfShardsForOrderByLimit(
+                relationId, tableId, jobQuery, prunedShardIntervalList);
 
             /*
              * If we prune all shards for one table, query results will be empty.

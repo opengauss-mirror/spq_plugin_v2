@@ -514,8 +514,8 @@ static ConnectionPlacementHashEntry* FindOrCreatePlacementEntry(ShardPlacement* 
             placementEntry->primaryConnection = colocatedEntry->primaryConnection;
             placementEntry->colocatedEntry = colocatedEntry;
         } else {
-            void* conRef = NULL;  // = MemoryContextAllocZero(TopTransactionContext,
-                                  //				  sizeof(ConnectionReference));
+            void* conRef = MemoryContextAllocZero(u_sess->top_transaction_mem_cxt,
+                                                  sizeof(ConnectionReference));
 
             placementEntry->primaryConnection = (ConnectionReference*)conRef;
         }

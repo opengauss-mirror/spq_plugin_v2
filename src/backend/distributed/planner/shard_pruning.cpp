@@ -1234,6 +1234,23 @@ static List* PruneOne(CitusTableCacheEntry* cacheEntry, ClauseWalkerContext* con
     }
 
     /*
+     * Vector shard bounds store cluster centers, not value ranges. Route
+     * equality constraints exactly as writes do, even when centers overlap,
+     * and never apply range pruning to these bounds. Without an equality
+     * constraint, any shard may contain matching values.
+     */
+    if (IsCitusTableTypeCacheEntry(cacheEntry, IVF_DISTRIBUTED) ||
+        IsCitusTableTypeCacheEntry(cacheEntry, HNSW_DISTRIBUTED)) {
+        if (prune->equalConsts) {
+            shardInterval = FindShardInterval(prune->equalConsts->constvalue, cacheEntry);
+            return shardInterval ? list_make1(shardInterval) : NIL;
+        }
+
+        return ShardArrayToList(cacheEntry->sortedShardIntervalArray,
+                                cacheEntry->shardIntervalArrayLength);
+    }
+
+    /*
      * For an equal constraints, if there's no overlapping shards (always the
      * case for hash and range partitioning, sometimes for append), can
      * perform binary search for the right interval. That's usually the

@@ -187,11 +187,15 @@ static CompositeTypeStmt* RecreateCompositeTypeStmt(Oid typeOid)
  */
 static ColumnDef* attributeFormToColumnDef(Form_pg_attribute attributeForm)
 {
-#ifdef DISABLE_OG_COMMENTS
-    return makeColumnDef(NameStr(attributeForm->attname), attributeForm->atttypid,
-                         attributeForm->atttypmod, attributeForm->attcollation);
-#endif
-    return makeColumnDef(NameStr(attributeForm->attname), "text");
+    ColumnDef* columnDef = makeNode(ColumnDef);
+
+    columnDef->colname = pstrdup(NameStr(attributeForm->attname));
+    columnDef->typname =
+        makeTypeNameFromOid(attributeForm->atttypid, attributeForm->atttypmod);
+    columnDef->is_local = true;
+    columnDef->collOid = attributeForm->attcollation;
+
+    return columnDef;
 }
 
 /*

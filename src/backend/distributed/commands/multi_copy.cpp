@@ -359,6 +359,8 @@ static void CitusCopyFrom(CopyStmt* copyStatement, const char* completionTag)
     EnsurePartitionTableNotReplicated(relationId);
 
     if (IsCitusTableTypeCacheEntry(cacheEntry, HASH_DISTRIBUTED) ||
+        IsCitusTableTypeCacheEntry(cacheEntry, IVF_DISTRIBUTED) ||
+        IsCitusTableTypeCacheEntry(cacheEntry, HNSW_DISTRIBUTED) ||
         IsCitusTableTypeCacheEntry(cacheEntry, RANGE_DISTRIBUTED) ||
         IsCitusTableTypeCacheEntry(cacheEntry, APPEND_DISTRIBUTED) ||
         !HasDistributionKeyCacheEntry(cacheEntry)) {
@@ -1763,6 +1765,8 @@ static void CitusCopyDestReceiverStartup(DestReceiver* dest, int operation,
     /* error if any shard missing min/max values */
     if (cacheEntry->hasUninitializedShardInterval) {
         if (IsCitusTableTypeCacheEntry(cacheEntry, HASH_DISTRIBUTED) ||
+            IsCitusTableTypeCacheEntry(cacheEntry, IVF_DISTRIBUTED) ||
+            IsCitusTableTypeCacheEntry(cacheEntry, HNSW_DISTRIBUTED) ||
             IsCitusTableTypeCacheEntry(cacheEntry, RANGE_DISTRIBUTED)) {
             ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                             errmsg("could not start copy"),

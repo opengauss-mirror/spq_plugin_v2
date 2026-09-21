@@ -419,6 +419,10 @@ CitusTableType GetCitusTableType(CitusTableCacheEntry* tableEntry)
 
     if (IsCitusTableTypeCacheEntry(tableEntry, HASH_DISTRIBUTED)) {
         return HASH_DISTRIBUTED;
+    } else if (IsCitusTableTypeCacheEntry(tableEntry, IVF_DISTRIBUTED)) {
+        return IVF_DISTRIBUTED;
+    } else if (IsCitusTableTypeCacheEntry(tableEntry, HNSW_DISTRIBUTED)) {
+        return HNSW_DISTRIBUTED;
     } else if (IsCitusTableTypeCacheEntry(tableEntry, SINGLE_SHARD_DISTRIBUTED)) {
         return SINGLE_SHARD_DISTRIBUTED;
     } else if (IsCitusTableTypeCacheEntry(tableEntry, REFERENCE_TABLE)) {
@@ -481,6 +485,14 @@ static bool IsCitusTableTypeInternal(char partitionMethod, char replicationModel
             return partitionMethod == DISTRIBUTE_BY_HASH;
         }
 
+        case IVF_DISTRIBUTED: {
+            return partitionMethod == DISTRIBUTE_BY_IVF;
+        }
+
+        case HNSW_DISTRIBUTED: {
+            return partitionMethod == DISTRIBUTE_BY_HNSW;
+        }
+
         case APPEND_DISTRIBUTED: {
             return partitionMethod == DISTRIBUTE_BY_APPEND;
         }
@@ -497,6 +509,8 @@ static bool IsCitusTableTypeInternal(char partitionMethod, char replicationModel
 
         case DISTRIBUTED_TABLE: {
             return partitionMethod == DISTRIBUTE_BY_HASH ||
+                   partitionMethod == DISTRIBUTE_BY_IVF ||
+                   partitionMethod == DISTRIBUTE_BY_HNSW ||
                    partitionMethod == DISTRIBUTE_BY_RANGE ||
                    partitionMethod == DISTRIBUTE_BY_APPEND ||
                    (partitionMethod == DISTRIBUTE_BY_NONE &&
@@ -506,6 +520,8 @@ static bool IsCitusTableTypeInternal(char partitionMethod, char replicationModel
 
         case STRICTLY_PARTITIONED_DISTRIBUTED_TABLE: {
             return partitionMethod == DISTRIBUTE_BY_HASH ||
+                   partitionMethod == DISTRIBUTE_BY_IVF ||
+                   partitionMethod == DISTRIBUTE_BY_HNSW ||
                    partitionMethod == DISTRIBUTE_BY_RANGE;
         }
 
@@ -4234,7 +4250,9 @@ static void GetPartitionTypeInputInfo(char* partitionKeyString, char partitionMe
     switch (partitionMethod) {
         case DISTRIBUTE_BY_APPEND:
         case DISTRIBUTE_BY_RANGE:
-        case DISTRIBUTE_BY_HASH: {
+        case DISTRIBUTE_BY_HASH:
+        case DISTRIBUTE_BY_IVF:
+        case DISTRIBUTE_BY_HNSW: {
             Node* partitionNode = static_cast<Node*>(stringToNode(partitionKeyString));
             Var* partitionColumn = (Var*)partitionNode;
             Assert(IsA(partitionNode, Var));
@@ -4272,7 +4290,9 @@ void GetIntervalTypeInfo(char partitionMethod, Var* partitionColumn, Oid* interv
 
     switch (partitionMethod) {
         case DISTRIBUTE_BY_APPEND:
-        case DISTRIBUTE_BY_RANGE: {
+        case DISTRIBUTE_BY_RANGE:
+        case DISTRIBUTE_BY_IVF:
+        case DISTRIBUTE_BY_HNSW: {
             /* we need a valid partition column Var in this case */
             if (partitionColumn == NULL) {
                 ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),

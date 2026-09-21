@@ -2835,11 +2835,14 @@ static void EnsurePartitionMetadataIsSane(Oid relationId, char distributionMetho
                                           Var* distributionColumnVar)
 {
     if (!(distributionMethod == DISTRIBUTE_BY_HASH ||
+          distributionMethod == DISTRIBUTE_BY_IVF ||
+          distributionMethod == DISTRIBUTE_BY_HNSW ||
           distributionMethod == DISTRIBUTE_BY_NONE)) {
-        ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                        errmsg("Metadata syncing is only allowed for hash, reference "
-                               "and local tables:%c",
-                               distributionMethod)));
+        ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("Metadata syncing is only allowed for hash, IVF, HNSW, reference "
+                        "and local tables:%c",
+                        distributionMethod)));
     }
 
     if (colocationId < INVALID_COLOCATION_ID) {
@@ -3002,10 +3005,12 @@ static void EnsureShardMetadataIsSane(Oid relationId, int64 shardId, char storag
                                "entry in pg_dist_partition.",
                                get_rel_name(relationId))));
     } else if (!(partitionMethod == DISTRIBUTE_BY_HASH ||
+                 partitionMethod == DISTRIBUTE_BY_IVF ||
+                 partitionMethod == DISTRIBUTE_BY_HNSW ||
                  partitionMethod == DISTRIBUTE_BY_NONE)) {
         /* connection from the coordinator operating on a shard */
         ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                        errmsg("Metadata syncing is only allowed for hash, "
+                        errmsg("Metadata syncing is only allowed for hash, IVF, HNSW, "
                                "reference and local tables: %c",
                                partitionMethod)));
     }
@@ -3025,7 +3030,9 @@ static void EnsureShardMetadataIsSane(Oid relationId, int64 shardId, char storag
                                    "adding more is not allowed",
                                    relationName)));
         }
-    } else if (partitionMethod == DISTRIBUTE_BY_HASH) {
+    } else if (partitionMethod == DISTRIBUTE_BY_HASH ||
+               partitionMethod == DISTRIBUTE_BY_IVF ||
+               partitionMethod == DISTRIBUTE_BY_HNSW) {
         if (shardMinValue == NULL || shardMaxValue == NULL) {
             char* relationName = get_rel_name(relationId);
             ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -3034,28 +3041,37 @@ static void EnsureShardMetadataIsSane(Oid relationId, int64 shardId, char storag
                                    relationName)));
         }
 
+        Var* partitionColumn = DistPartitionKeyOrError(relationId);
+        Oid intervalTypeId = InvalidOid;
+        int32 intervalTypeMod = -1;
+        Datum firstMin = 0;
+        Datum firstMax = 0;
+        GetIntervalTypeInfo(partitionMethod, partitionColumn, &intervalTypeId,
+                            &intervalTypeMod);
+
         char* shardMinValueString = text_to_cstring(shardMinValue);
         char* shardMaxValueString = text_to_cstring(shardMaxValue);
 
-        /* pg_strtoint32 does the syntax and out of bound checks for us */
-        int32 shardMinValueInt = pg_strtoint32(shardMinValueString);
-        int32 shardMaxValueInt = pg_strtoint32(shardMaxValueString);
+        if (partitionMethod == DISTRIBUTE_BY_HASH) {
+            /* pg_strtoint32 does the syntax and out of bound checks for us */
+            int32 shardMinValueInt = pg_strtoint32(shardMinValueString);
+            int32 shardMaxValueInt = pg_strtoint32(shardMaxValueString);
 
-        if (shardMinValueInt > shardMaxValueInt) {
-            ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                            errmsg("shardMinValue=%d is greater than "
-                                   "shardMaxValue=%d for table \"%s\", which is "
-                                   "not allowed",
-                                   shardMinValueInt, shardMaxValueInt,
-                                   get_rel_name(relationId))));
+            if (shardMinValueInt > shardMaxValueInt) {
+                ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                                errmsg("shardMinValue=%d is greater than "
+                                       "shardMaxValue=%d for table \"%s\", which is "
+                                       "not allowed",
+                                       shardMinValueInt, shardMaxValueInt,
+                                       get_rel_name(relationId))));
+            }
+
+            firstMin = Int32GetDatum(shardMinValueInt);
+            firstMax = Int32GetDatum(shardMaxValueInt);
+        } else {
+            firstMin = StringToDatum(shardMinValueString, intervalTypeId);
+            firstMax = StringToDatum(shardMaxValueString, intervalTypeId);
         }
-
-        /*
-         * We are only dealing with hash distributed tables, that's why we
-         * can hard code data type and typemod.
-         */
-        const int intervalTypeId = INT4OID;
-        const int intervalTypeMod = -1;
 
         Relation distShardRelation = table_open(DistShardRelationId(), AccessShareLock);
         TupleDesc distShardTupleDesc = RelationGetDescr(distShardRelation);
@@ -3069,8 +3085,6 @@ static void EnsureShardMetadataIsSane(Oid relationId, int64 shardId, char storag
             ShardInterval* shardInterval = TupleToShardInterval(
                 shardTuple, distShardTupleDesc, intervalTypeId, intervalTypeMod);
 
-            Datum firstMin = Int32GetDatum(shardMinValueInt);
-            Datum firstMax = Int32GetDatum(shardMaxValueInt);
             Datum secondMin = shardInterval->minValue;
             Datum secondMax = shardInterval->maxValue;
             Oid collationId = InvalidOid;

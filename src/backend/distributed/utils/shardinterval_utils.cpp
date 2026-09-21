@@ -10,6 +10,7 @@
  */
 #include "postgres.h"
 
+#include <cfloat>
 #include "stdint.h"
 
 #include "access/nbtree.h"
@@ -18,6 +19,7 @@
 #include "catalog/pg_type.h"
 #include "utils/catcache.h"
 #include "utils/memutils.h"
+#include "access/datavec/vector.h"
 
 #include "distributed/distributed_planner.h"
 #include "distributed/listutils.h"
@@ -163,6 +165,73 @@ int CompareRelationShards(const void* leftElement, const void* rightElement)
     }
 }
 
+typedef struct VectorCenterShardDistance {
+    int shardIndex;
+    double distance;
+} VectorCenterShardDistance;
+
+static int CompareVectorCenterShardDistances(const void* leftElement,
+                                             const void* rightElement)
+{
+    const VectorCenterShardDistance* left = (const VectorCenterShardDistance*)leftElement;
+    const VectorCenterShardDistance* right =
+        (const VectorCenterShardDistance*)rightElement;
+
+    if (left->distance < right->distance) {
+        return -1;
+    }
+    if (left->distance > right->distance) {
+        return 1;
+    }
+
+    return left->shardIndex - right->shardIndex;
+}
+
+static int FindNearestVectorCenterShardIntervalIndex(Datum partitionColumnValue,
+                                                     CitusTableCacheEntry* cacheEntry)
+{
+    ShardInterval** shardIntervalCache = cacheEntry->sortedShardIntervalArray;
+    int shardCount = cacheEntry->shardIntervalArrayLength;
+    Vector* queryVector = DatumGetVector(partitionColumnValue);
+    VectorCenterShardDistance* distances = NULL;
+
+    if (shardCount == 0) {
+        return INVALID_SHARD_INDEX;
+    }
+
+    distances = (VectorCenterShardDistance*)palloc0(sizeof(VectorCenterShardDistance) *
+                                                    shardCount);
+
+    for (int shardIndex = 0; shardIndex < shardCount; shardIndex++) {
+        ShardInterval* shardInterval = shardIntervalCache[shardIndex];
+
+        if (!shardInterval->minValueExists) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                     errmsg("vector distributed shard " UINT64_FORMAT
+                            " has no distribution center",
+                            shardInterval->shardId),
+                     errdetail("Shard metadata in pg_dist_shard is inconsistent.")));
+        }
+
+        Vector* center = DatumGetVector(shardInterval->minValue);
+        if (center->dim != queryVector->dim) {
+            ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+                            errmsg("vector distribution center dimension does not "
+                                   "match query vector dimension")));
+        }
+
+        distances[shardIndex].shardIndex = shardIndex;
+        distances[shardIndex].distance =
+            VectorL2SquaredDistance(queryVector->dim, center->x, queryVector->x);
+    }
+
+    qsort(distances, shardCount, sizeof(VectorCenterShardDistance),
+          CompareVectorCenterShardDistances);
+
+    return distances[0].shardIndex;
+}
+
 /*
  * ShardIndex finds the index of given shard in sorted shard interval array.
  *
@@ -183,6 +252,19 @@ int ShardIndex(ShardInterval* shardInterval)
      * Note that, we can also support append and range distributed tables, but
      * currently it is not required.
      */
+    if (IsCitusTableTypeCacheEntry(cacheEntry, IVF_DISTRIBUTED) ||
+        IsCitusTableTypeCacheEntry(cacheEntry, HNSW_DISTRIBUTED)) {
+        for (int shardIndex = 0; shardIndex < cacheEntry->shardIntervalArrayLength;
+             shardIndex++) {
+            if (cacheEntry->sortedShardIntervalArray[shardIndex]->shardId ==
+                shardInterval->shardId) {
+                return shardIndex;
+            }
+        }
+
+        return INVALID_SHARD_INDEX;
+    }
+
     if (!IsCitusTableTypeCacheEntry(cacheEntry, HASH_DISTRIBUTED) &&
         HasDistributionKeyCacheEntry(cacheEntry)) {
         ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -221,6 +303,16 @@ ShardInterval* FindShardInterval(Datum partitionColumnValue,
         searchedValue = FunctionCall1Coll(cacheEntry->hashFunction,
                                           cacheEntry->partitionColumn->varcollid,
                                           partitionColumnValue);
+    } else if (IsCitusTableTypeCacheEntry(cacheEntry, IVF_DISTRIBUTED) ||
+               IsCitusTableTypeCacheEntry(cacheEntry, HNSW_DISTRIBUTED)) {
+        int vectorCenterShardIndex =
+            FindNearestVectorCenterShardIntervalIndex(partitionColumnValue, cacheEntry);
+
+        if (vectorCenterShardIndex == INVALID_SHARD_INDEX) {
+            return NULL;
+        }
+
+        return cacheEntry->sortedShardIntervalArray[vectorCenterShardIndex];
     }
 
     int shardIndex = FindShardIntervalIndex(searchedValue, cacheEntry);
