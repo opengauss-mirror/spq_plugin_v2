@@ -1,3 +1,9 @@
+SELECT 'hnsw'::__$spq$__.distribution_type;
+ distribution_type
+---------------------------------------------------------------------
+ hnsw
+(1 row)
+
 CREATE TABLE test (id int, val bit(3));
 SELECT create_distributed_table('test', 'id', 'append');
 ERROR:  invalid input value for enum "__$spq$__".distribution_type: "append"

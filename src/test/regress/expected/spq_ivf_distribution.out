@@ -1,0 +1,257 @@
+SET spq.propagate_set_commands = 'local';
+CREATE OR REPLACE FUNCTION ivf_distribution_task_count(query_text text)
+    RETURNS text
+    LANGUAGE plpgsql
+AS $$
+DECLARE
+    plan_line text;
+BEGIN
+    FOR plan_line IN EXECUTE 'EXPLAIN ' || query_text LOOP
+        IF plan_line LIKE '%Task Count:%' THEN
+            RETURN btrim(plan_line);
+        END IF;
+    END LOOP;
+
+    RETURN NULL;
+END;
+$$;
+-- successful IVF distributed table creation
+CREATE TABLE ivf_dist_t (id int, val vector(2));
+INSERT INTO ivf_dist_t (id, val) VALUES
+    (1, '[0,0]'),
+    (2, '[0,1]'),
+    (3, '[10,10]'),
+    (4, '[10,11]');
+CREATE INDEX ivf_dist_t_val_idx ON ivf_dist_t USING ivfflat (val vector_l2_ops) WITH (lists = 2);
+SELECT create_distributed_table(
+    'ivf_dist_t'::regclass,
+    'val'::text,
+    'ivf'::__$spq$__.distribution_type,
+    3);
+NOTICE:  Copying data from local table...
+CONTEXT:  referenced column: create_distributed_table
+NOTICE:  copying the data has completed
+DETAIL:  The local data in the table is no longer visible, but is still on disk.
+HINT:  To remove the local data, run: SELECT truncate_local_data_after_distributing_table($$public.ivf_dist_t$$)
+CONTEXT:  referenced column: create_distributed_table
+ create_distributed_table
+---------------------------------------------------------------------
+
+(1 row)
+
+SELECT partmethod
+FROM pg_dist_partition
+WHERE logicalrelid = 'ivf_dist_t'::regclass;
+ partmethod
+---------------------------------------------------------------------
+ v
+(1 row)
+
+SELECT count(*)
+FROM pg_dist_shard
+WHERE logicalrelid = 'ivf_dist_t'::regclass;
+ count
+---------------------------------------------------------------------
+     2
+(1 row)
+
+SELECT count(*)
+FROM pg_dist_shard
+WHERE logicalrelid = 'ivf_dist_t'::regclass
+  AND shardminvalue IS NOT NULL
+  AND shardmaxvalue IS NOT NULL
+  AND shardminvalue = shardmaxvalue;
+ count
+---------------------------------------------------------------------
+     2
+(1 row)
+
+INSERT INTO ivf_dist_t (id, val) VALUES
+    (5, '[0.2,0.1]'),
+    (6, '[10.2,10.1]');
+SELECT count(*) FROM ivf_dist_t;
+ count
+---------------------------------------------------------------------
+     6
+(1 row)
+
+SELECT id FROM ivf_dist_t ORDER BY id;
+ id
+---------------------------------------------------------------------
+  1
+  2
+  3
+  4
+  5
+  6
+(6 rows)
+
+SET ivfflat_distributed_probes = 1;
+SELECT ivf_distribution_task_count(
+    'SELECT id FROM ivf_dist_t ORDER BY val <-> ''[0,0]''::vector LIMIT 1');
+ ivf_distribution_task_count
+---------------------------------------------------------------------
+ Task Count: 1
+(1 row)
+
+SELECT ivf_distribution_task_count(
+    'SELECT id FROM ivf_dist_t ORDER BY val <-> ''[0,0]''::vector');
+ ivf_distribution_task_count
+---------------------------------------------------------------------
+ Task Count: 2
+(1 row)
+
+SET ivfflat_distributed_probes = 2;
+SELECT ivf_distribution_task_count(
+    'SELECT id FROM ivf_dist_t ORDER BY val <-> ''[0,0]''::vector LIMIT 1');
+ ivf_distribution_task_count
+---------------------------------------------------------------------
+ Task Count: 2
+(1 row)
+
+DROP TABLE ivf_dist_t;
+-- shard_count can be smaller than IVF center count
+CREATE TABLE ivf_more_centers (id int, val vector(2));
+INSERT INTO ivf_more_centers (id, val) VALUES
+    (1, '[0,0]'),
+    (2, '[0,1]'),
+    (3, '[0,2]'),
+    (4, '[10,10]'),
+    (5, '[10,11]'),
+    (6, '[10,12]');
+CREATE INDEX ivf_more_centers_val_idx ON ivf_more_centers USING ivfflat (val vector_l2_ops) WITH (lists = 3);
+SELECT create_distributed_table(
+    'ivf_more_centers'::regclass,
+    'val'::text,
+    'ivf'::__$spq$__.distribution_type,
+    2);
+NOTICE:  Copying data from local table...
+CONTEXT:  referenced column: create_distributed_table
+NOTICE:  copying the data has completed
+DETAIL:  The local data in the table is no longer visible, but is still on disk.
+HINT:  To remove the local data, run: SELECT truncate_local_data_after_distributing_table($$public.ivf_more_centers$$)
+CONTEXT:  referenced column: create_distributed_table
+ create_distributed_table
+---------------------------------------------------------------------
+
+(1 row)
+
+SELECT partmethod
+FROM pg_dist_partition
+WHERE logicalrelid = 'ivf_more_centers'::regclass;
+ partmethod
+---------------------------------------------------------------------
+ v
+(1 row)
+
+SELECT count(*)
+FROM pg_dist_shard
+WHERE logicalrelid = 'ivf_more_centers'::regclass;
+ count
+---------------------------------------------------------------------
+     3
+(1 row)
+
+SELECT count(*)
+FROM pg_dist_shard
+WHERE logicalrelid = 'ivf_more_centers'::regclass
+  AND shardminvalue IS NOT NULL
+  AND shardmaxvalue IS NOT NULL
+  AND shardminvalue = shardmaxvalue;
+ count
+---------------------------------------------------------------------
+     3
+(1 row)
+
+INSERT INTO ivf_more_centers (id, val) VALUES
+    (7, '[0.2,0.1]'),
+    (8, '[10.2,10.1]');
+SELECT count(*) FROM ivf_more_centers;
+ count
+---------------------------------------------------------------------
+     8
+(1 row)
+
+SELECT id FROM ivf_more_centers ORDER BY id;
+ id
+---------------------------------------------------------------------
+  1
+  2
+  3
+  4
+  5
+  6
+  7
+  8
+(8 rows)
+
+SET ivfflat_distributed_probes = 1;
+SELECT ivf_distribution_task_count(
+    'SELECT id FROM ivf_more_centers ORDER BY val <-> ''[0,0]''::vector LIMIT 1');
+ ivf_distribution_task_count
+---------------------------------------------------------------------
+ Task Count: 1
+(1 row)
+
+SELECT ivf_distribution_task_count(
+    'SELECT id FROM ivf_more_centers ORDER BY val <-> ''[0,0]''::vector');
+ ivf_distribution_task_count
+---------------------------------------------------------------------
+ Task Count: 3
+(1 row)
+
+SET ivfflat_distributed_probes = 2;
+SELECT ivf_distribution_task_count(
+    'SELECT id FROM ivf_more_centers ORDER BY val <-> ''[0,0]''::vector LIMIT 1');
+ ivf_distribution_task_count
+---------------------------------------------------------------------
+ Task Count: 2
+(1 row)
+
+DROP TABLE ivf_more_centers;
+-- distribution column must be vector
+CREATE TABLE ivf_non_vector_dist (id int, val vector(2));
+INSERT INTO ivf_non_vector_dist (id, val) VALUES
+    (1, '[0,0]'),
+    (2, '[1,1]');
+CREATE INDEX ivf_non_vector_dist_val_idx ON ivf_non_vector_dist USING ivfflat (val vector_l2_ops) WITH (lists = 1);
+SELECT create_distributed_table(
+    'ivf_non_vector_dist'::regclass,
+    'id'::text,
+    'ivf'::__$spq$__.distribution_type);
+ERROR:  IVF distribution requires a vector distribution column
+CONTEXT:  referenced column: create_distributed_table
+DROP TABLE ivf_non_vector_dist;
+-- IVF distribution requires an L2 IVFFLAT index on the distribution column
+CREATE TABLE ivf_no_l2_index (id int, val vector(2));
+INSERT INTO ivf_no_l2_index (id, val) VALUES
+    (1, '[0,0]'),
+    (2, '[1,1]');
+CREATE INDEX ivf_no_l2_index_val_idx ON ivf_no_l2_index USING ivfflat (val vector_ip_ops) WITH (lists = 1);
+SELECT create_distributed_table(
+    'ivf_no_l2_index'::regclass,
+    'val'::text,
+    'ivf'::__$spq$__.distribution_type);
+ERROR:  could not find a valid L2 ivfflat index for IVF distribution
+HINT:  Create an ivfflat index with vector_l2_ops on the distribution vector column before calling create_distributed_table(..., 'ivf').
+CONTEXT:  referenced column: create_distributed_table
+DROP TABLE ivf_no_l2_index;
+-- empty tables cannot generate distribution centers
+CREATE TABLE ivf_empty_dist (id int, val vector(2));
+CREATE INDEX ivf_empty_dist_val_idx ON ivf_empty_dist USING ivfflat (val vector_l2_ops) WITH (lists = 1);
+NOTICE:  ivfflat index created with little data
+DETAIL:  This will cause low recall.
+HINT:  Drop the index until the table has more data.
+SELECT create_distributed_table(
+    'ivf_empty_dist'::regclass,
+    'val'::text,
+    'ivf'::__$spq$__.distribution_type);
+ create_distributed_table
+---------------------------------------------------------------------
+
+(1 row)
+
+DROP TABLE ivf_empty_dist;
+DROP FUNCTION ivf_distribution_task_count;
+SET ivfflat_distributed_probes = DEFAULT;
+SET spq.propagate_set_commands = DEFAULT;

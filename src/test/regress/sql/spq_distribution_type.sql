@@ -1,3 +1,5 @@
+SELECT 'hnsw'::__$spq$__.distribution_type;
+
 CREATE TABLE test (id int, val bit(3));
 SELECT create_distributed_table('test', 'id', 'append');
 SELECT create_distributed_table('test', 'id', 'range');
