@@ -7,6 +7,29 @@ CREATE SCHEMA type_tests2 AUTHORIZATION typeuser; -- to test creation in a speci
 SET search_path TO type_tests;
 SET citus.shard_count TO 4;
 
+-- Composite type recreation must preserve type OIDs, typmods and collations.
+CREATE TYPE address_type AS (
+    street varchar(100),
+    city varchar(50),
+    country varchar(50)
+);
+SELECT run_command_on_workers($$SELECT array_agg(atttypmod ORDER BY attnum)::text
+    FROM pg_attribute
+    WHERE attrelid = 'type_tests.address_type'::regclass AND attnum > 0;$$);
+
+-- Exercise types that use format_type_extended's generic and array paths.
+CREATE TYPE format_type_edge AS (
+    plain text,
+    localized text COLLATE "POSIX",
+    texts text[]
+);
+SELECT run_command_on_workers($$SELECT string_agg(format_type(atttypid, atttypmod), ',' ORDER BY attnum)
+    FROM pg_attribute
+    WHERE attrelid = 'type_tests.format_type_edge'::regclass AND attnum > 0;$$);
+SELECT run_command_on_workers($$SELECT collname
+    FROM pg_attribute JOIN pg_collation ON attcollation = pg_collation.oid
+    WHERE attrelid = 'type_tests.format_type_edge'::regclass AND attname = 'localized';$$);
+
 -- single statement transactions with a simple type used in a table
 CREATE TYPE tc1 AS (a int, b varchar(20));
 CREATE TABLE t1 (a int PRIMARY KEY, b tc1);
