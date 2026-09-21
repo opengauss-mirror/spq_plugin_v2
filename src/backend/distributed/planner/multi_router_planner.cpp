@@ -2836,6 +2836,8 @@ static List* BuildRoutesForInsert(Query* query, DeferredErrorMessage** planningE
         }
 
         if (IsCitusTableTypeCacheEntry(cacheEntry, HASH_DISTRIBUTED) ||
+            IsCitusTableTypeCacheEntry(cacheEntry, IVF_DISTRIBUTED) ||
+            IsCitusTableTypeCacheEntry(cacheEntry, HNSW_DISTRIBUTED) ||
             IsCitusTableTypeCacheEntry(cacheEntry, RANGE_DISTRIBUTED)) {
             Datum partitionValue = partitionValueConst->constvalue;
 

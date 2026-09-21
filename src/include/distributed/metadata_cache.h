@@ -113,14 +113,16 @@ typedef struct DistObjectCacheEntry {
 
 typedef enum {
     HASH_DISTRIBUTED,
+    IVF_DISTRIBUTED,
+    HNSW_DISTRIBUTED,
     APPEND_DISTRIBUTED,
     RANGE_DISTRIBUTED,
     SINGLE_SHARD_DISTRIBUTED,
 
-    /* hash, range or append distributed table */
+    /* hash, ivf, hnsw, range or append distributed table */
     DISTRIBUTED_TABLE,
 
-    /* hash- or range-distributed table */
+    /* hash-, ivf-, hnsw- or range-distributed table */
     STRICTLY_PARTITIONED_DISTRIBUTED_TABLE,
 
     REFERENCE_TABLE,

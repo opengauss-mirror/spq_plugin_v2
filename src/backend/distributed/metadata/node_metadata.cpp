@@ -1324,6 +1324,8 @@ Datum get_shard_id_for_distribution_column(PG_FUNCTION_ARGS)
 
         shardInterval = (ShardInterval*)linitial(shardIntervalList);
     } else if (IsCitusTableType(relationId, HASH_DISTRIBUTED) ||
+               IsCitusTableType(relationId, IVF_DISTRIBUTED) ||
+               IsCitusTableType(relationId, HNSW_DISTRIBUTED) ||
                IsCitusTableType(relationId, RANGE_DISTRIBUTED)) {
         CitusTableCacheEntry* cacheEntry = GetCitusTableCacheEntry(relationId);
 
@@ -1346,10 +1348,11 @@ Datum get_shard_id_for_distribution_column(PG_FUNCTION_ARGS)
 
         shardInterval = FindShardInterval(distributionValueDatum, cacheEntry);
     } else {
-        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                        errmsg("finding shard id of given distribution value is only "
-                               "supported for hash partitioned tables, range partitioned "
-                               "tables and reference tables.")));
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("finding shard id of given distribution value is only "
+                        "supported for hash partitioned tables, IVF partitioned "
+                        "tables, range partitioned tables and reference tables.")));
     }
 
     if (shardInterval != NULL) {

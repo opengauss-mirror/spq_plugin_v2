@@ -12,6 +12,8 @@
 
 #include "miscadmin.h"
 
+#include "access/datavec/hnsw.h"
+#include "access/datavec/ivfflat.h"
 #include "access/genam.h"
 #include "access/hash.h"
 #include "access/heapam.h"
@@ -131,6 +133,10 @@ typedef struct {
     bool shardCountIsStrict;
     char* distributionColumnName;
     ColocationParam colocationParam;
+    Oid ivfIndexId;
+    List* ivfCenterList;
+    Oid hnswIndexId;
+    List* hnswCenterList;
 } DistributedTableParams;
 
 /*
@@ -159,6 +165,10 @@ static void ConvertCitusLocalTableToTableType(
     DistributedTableParams* distributedTableParams);
 static void CreateHashDistributedTableShards(Oid relationId, int shardCount,
                                              Oid colocatedTableId, bool localTableEmpty);
+static void CreateIvfDistributedTableShards(Oid relationId, List* centerList,
+                                            Oid colocatedTableId, bool localTableEmpty);
+static void CreateHnswDistributedTableShards(Oid relationId, List* centerList,
+                                             Oid colocatedTableId, bool localTableEmpty);
 static void CreateSingleShardTableShard(Oid relationId, Oid colocatedTableId,
                                         uint32 colocationId);
 static uint32 ColocationIdForNewTable(Oid relationId, CitusTableType tableType,
@@ -178,6 +188,14 @@ static void PropagatePrerequisiteObjectsForDistributedTable(Oid relationId);
 static void EnsureDistributedSequencesHaveOneType(Oid relationId, List* seqInfoList);
 static void CopyLocalDataIntoShards(Oid distributedTableId);
 static List* TupleDescColumnNameList(TupleDesc tupleDescriptor);
+static void PrepareIvfDistributedTableParams(
+    Oid relationId, Var* distributionColumn,
+    DistributedTableParams* distributedTableParams);
+static Oid FindIvfflatIndexForDistributionColumn(Oid relationId, Var* distributionColumn);
+static void PrepareHnswDistributedTableParams(
+    Oid relationId, Var* distributionColumn,
+    DistributedTableParams* distributedTableParams);
+static Oid FindHnswIndexForDistributionColumn(Oid relationId, Var* distributionColumn);
 
 static bool DistributionColumnUsesNumericColumnNegativeScale(TupleDesc relationDesc,
                                                              Var* distributionColumn);
@@ -919,6 +937,16 @@ void CreateDistributedTable(Oid relationId, char* distributionColumnName,
             break;
         }
 
+        case DISTRIBUTE_BY_IVF: {
+            tableType = IVF_DISTRIBUTED;
+            break;
+        }
+
+        case DISTRIBUTE_BY_HNSW: {
+            tableType = HNSW_DISTRIBUTED;
+            break;
+        }
+
         case DISTRIBUTE_BY_APPEND: {
             tableType = APPEND_DISTRIBUTED;
             break;
@@ -1002,7 +1030,8 @@ void CreateSingleShardTable(Oid relationId, ColocationParam colocationParam)
 static void CreateCitusTable(Oid relationId, CitusTableType tableType,
                              DistributedTableParams* distributedTableParams)
 {
-    if ((tableType == HASH_DISTRIBUTED || tableType == APPEND_DISTRIBUTED ||
+    if ((tableType == HASH_DISTRIBUTED || tableType == IVF_DISTRIBUTED ||
+         tableType == HNSW_DISTRIBUTED || tableType == APPEND_DISTRIBUTED ||
          tableType == RANGE_DISTRIBUTED || tableType == SINGLE_SHARD_DISTRIBUTED) !=
         (distributedTableParams != NULL)) {
         ereport(ERROR, (errmsg("distributed table params must be provided "
@@ -1097,6 +1126,14 @@ static void CreateCitusTable(Oid relationId, CitusTableType tableType,
             relationId, distributedTableParams->distributionColumnName, NoLock);
     }
 
+    if (tableType == IVF_DISTRIBUTED) {
+        PrepareIvfDistributedTableParams(relationId, distributionColumn,
+                                         distributedTableParams);
+    } else if (tableType == HNSW_DISTRIBUTED) {
+        PrepareHnswDistributedTableParams(relationId, distributionColumn,
+                                          distributedTableParams);
+    }
+
     CitusTableParams citusTableParams =
         DecideCitusTableParams(tableType, distributedTableParams);
 
@@ -1152,6 +1189,7 @@ static void CreateCitusTable(Oid relationId, CitusTableType tableType,
     InsertIntoPgDistPartition(relationId, citusTableParams.distributionMethod,
                               distributionColumn, colocationId,
                               citusTableParams.replicationModel, autoConverted);
+    AcceptInvalidationMessages();
 
 #if PG_VERSION_NUM >= PG_VERSION_16
 
@@ -1171,6 +1209,13 @@ static void CreateCitusTable(Oid relationId, CitusTableType tableType,
     if (tableType == HASH_DISTRIBUTED) {
         /* create shards for hash distributed table */
         CreateHashDistributedTableShards(relationId, distributedTableParams->shardCount,
+                                         colocatedTableId, localTableEmpty);
+    } else if (tableType == IVF_DISTRIBUTED) {
+        CreateIvfDistributedTableShards(relationId, distributedTableParams->ivfCenterList,
+                                        colocatedTableId, localTableEmpty);
+    } else if (tableType == HNSW_DISTRIBUTED) {
+        CreateHnswDistributedTableShards(relationId,
+                                         distributedTableParams->hnswCenterList,
                                          colocatedTableId, localTableEmpty);
     } else if (tableType == REFERENCE_TABLE) {
         /* create shards for reference table */
@@ -1193,7 +1238,8 @@ static void CreateCitusTable(Oid relationId, CitusTableType tableType,
     }
 
     /* copy over data for hash distributed and reference tables */
-    if (tableType == HASH_DISTRIBUTED || tableType == SINGLE_SHARD_DISTRIBUTED ||
+    if (tableType == HASH_DISTRIBUTED || tableType == IVF_DISTRIBUTED ||
+        tableType == HNSW_DISTRIBUTED || tableType == SINGLE_SHARD_DISTRIBUTED ||
         tableType == REFERENCE_TABLE) {
         if (RegularTable(relationId)) {
             CopyLocalDataIntoShards(relationId);
@@ -1373,6 +1419,28 @@ static CitusTableParams DecideCitusTableParams(
             citusTableParams.distributionMethod = DISTRIBUTE_BY_HASH;
             citusTableParams.replicationModel = DecideDistTableReplicationModel(
                 DISTRIBUTE_BY_HASH,
+                distributedTableParams->colocationParam.colocateWithTableName);
+            break;
+        }
+
+        case IVF_DISTRIBUTED: {
+            Assert(distributedTableParams->colocationParam.colocationParamType ==
+                   COLOCATE_WITH_TABLE_LIKE_OPT);
+
+            citusTableParams.distributionMethod = DISTRIBUTE_BY_IVF;
+            citusTableParams.replicationModel = DecideDistTableReplicationModel(
+                DISTRIBUTE_BY_IVF,
+                distributedTableParams->colocationParam.colocateWithTableName);
+            break;
+        }
+
+        case HNSW_DISTRIBUTED: {
+            Assert(distributedTableParams->colocationParam.colocationParamType ==
+                   COLOCATE_WITH_TABLE_LIKE_OPT);
+
+            citusTableParams.distributionMethod = DISTRIBUTE_BY_HNSW;
+            citusTableParams.replicationModel = DecideDistTableReplicationModel(
+                DISTRIBUTE_BY_HNSW,
                 distributedTableParams->colocationParam.colocateWithTableName);
             break;
         }
@@ -1595,7 +1663,9 @@ static char DecideDistTableReplicationModel(char distributionMethod,
         char replicationModel = targetTableEntry->replicationModel;
 
         return replicationModel;
-    } else if (distributionMethod == DISTRIBUTE_BY_HASH &&
+    } else if ((distributionMethod == DISTRIBUTE_BY_HASH ||
+                distributionMethod == DISTRIBUTE_BY_IVF ||
+                distributionMethod == DISTRIBUTE_BY_HNSW) &&
                !DistributedTableReplicationIsEnabled()) {
         return REPLICATION_MODEL_STREAMING;
     } else {
@@ -1647,6 +1717,54 @@ static void CreateHashDistributedTableShards(Oid relationId, int shardCount,
                                          Session_ctx::Vars().ShardReplicationFactor,
                                          useExclusiveConnection);
     }
+}
+
+/*
+ * CreateIvfDistributedTableShards creates shards for an IVF distributed table.
+ */
+static void CreateIvfDistributedTableShards(Oid relationId, List* centerList,
+                                            Oid colocatedTableId, bool localTableEmpty)
+{
+    bool useExclusiveConnection = false;
+
+    if (colocatedTableId != InvalidOid) {
+        ereport(
+            ERROR,
+            (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+             errmsg("IVF distributed tables do not support colocated shard creation")));
+    }
+
+    if (RegularTable(relationId)) {
+        useExclusiveConnection = CanUseExclusiveConnections(relationId, localTableEmpty);
+    }
+
+    CreateIvfShardsWithRoundRobinPolicy(relationId, centerList,
+                                        Session_ctx::Vars().ShardReplicationFactor,
+                                        useExclusiveConnection);
+}
+
+/*
+ * CreateHnswDistributedTableShards creates shards for an HNSW distributed table.
+ */
+static void CreateHnswDistributedTableShards(Oid relationId, List* centerList,
+                                             Oid colocatedTableId, bool localTableEmpty)
+{
+    bool useExclusiveConnection = false;
+
+    if (colocatedTableId != InvalidOid) {
+        ereport(
+            ERROR,
+            (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+             errmsg("HNSW distributed tables do not support colocated shard creation")));
+    }
+
+    if (RegularTable(relationId)) {
+        useExclusiveConnection = CanUseExclusiveConnections(relationId, localTableEmpty);
+    }
+
+    CreateVectorCenterShardsWithRoundRobinPolicy(
+        relationId, centerList, Session_ctx::Vars().ShardReplicationFactor,
+        useExclusiveConnection);
 }
 
 /*
@@ -1846,6 +1964,20 @@ static void EnsureRelationCanBeDistributed(Oid relationId, Var* distributionColu
                             errdetail("Partition column types must have a hash function "
                                       "defined to use hash partitioning.")));
         }
+    } else if (distributionMethod == DISTRIBUTE_BY_IVF) {
+        if (distributionColumn->vartype != VECTOROID) {
+            ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                            errmsg("IVF distribution only supports vector columns"),
+                            errdetail("Distribution column type is %s.",
+                                      format_type_be(distributionColumn->vartype))));
+        }
+    } else if (distributionMethod == DISTRIBUTE_BY_HNSW) {
+        if (distributionColumn->vartype != VECTOROID) {
+            ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                            errmsg("HNSW distribution only supports vector columns"),
+                            errdetail("Distribution column type is %s.",
+                                      format_type_be(distributionColumn->vartype))));
+        }
     } else if (distributionMethod == DISTRIBUTE_BY_RANGE) {
         Oid btreeSupportFunction =
             SupportFunctionForColumn(distributionColumn, BTREE_AM_OID, BTORDER_PROC);
@@ -1924,6 +2056,8 @@ static bool ShouldLocalTableBeEmpty(Oid relationId, char distributionMethod)
 {
     bool shouldLocalTableBeEmpty = false;
     if (distributionMethod != DISTRIBUTE_BY_HASH &&
+        distributionMethod != DISTRIBUTE_BY_IVF &&
+        distributionMethod != DISTRIBUTE_BY_HNSW &&
         distributionMethod != DISTRIBUTE_BY_NONE) {
         /*
          * We only support hash distributed tables and reference tables
@@ -2033,6 +2167,10 @@ char LookupDistributionMethod(Oid distributionMethodOid)
 
     if (strncmp(enumLabel, "hash", NAMEDATALEN) == 0) {
         distributionMethod = DISTRIBUTE_BY_HASH;
+    } else if (strncmp(enumLabel, "ivf", NAMEDATALEN) == 0) {
+        distributionMethod = DISTRIBUTE_BY_IVF;
+    } else if (strncmp(enumLabel, "hnsw", NAMEDATALEN) == 0) {
+        distributionMethod = DISTRIBUTE_BY_HNSW;
 #ifdef DISABLE_OG_COMMENTS
     } else if (strncmp(enumLabel, "append", NAMEDATALEN) == 0) {
         distributionMethod = DISTRIBUTE_BY_APPEND;
@@ -2046,6 +2184,204 @@ char LookupDistributionMethod(Oid distributionMethodOid)
     ReleaseSysCache(enumTuple);
 
     return distributionMethod;
+}
+
+static void PrepareIvfDistributedTableParams(
+    Oid relationId, Var* distributionColumn,
+    DistributedTableParams* distributedTableParams)
+{
+    Oid indexId = FindIvfflatIndexForDistributionColumn(relationId, distributionColumn);
+    Relation indexRelation = index_open(indexId, AccessShareLock);
+    List* centerList = IvfflatLoadCenters(indexRelation);
+    int centerCount = list_length(centerList);
+
+    index_close(indexRelation, AccessShareLock);
+
+    if (centerCount <= 0) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("IVF index does not contain any centers")));
+    }
+
+    /*
+     * IVF shard placement follows the centers loaded from the ivfflat index.
+     * Allow the caller-provided shard_count to differ from the center count.
+     */
+    distributedTableParams->shardCount = centerCount;
+    distributedTableParams->ivfIndexId = indexId;
+    distributedTableParams->ivfCenterList = centerList;
+}
+
+static void PrepareHnswDistributedTableParams(
+    Oid relationId, Var* distributionColumn,
+    DistributedTableParams* distributedTableParams)
+{
+    if (!distributedTableParams->shardCountIsStrict) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("shard_count must be specified for HNSW distribution"),
+                        errhint("Call create_distributed_table(..., distribution_type => "
+                                "'hnsw', shard_count => N).")));
+    }
+
+    Oid indexId = FindHnswIndexForDistributionColumn(relationId, distributionColumn);
+    Relation heapRelation = relation_open(relationId, AccessShareLock);
+    Relation indexRelation = index_open(indexId, AccessShareLock);
+    IndexInfo* indexInfo = BuildIndexInfo(indexRelation);
+    List* centerList = HnswLoadCenters(heapRelation, indexRelation, indexInfo,
+                                       distributedTableParams->shardCount);
+    int centerCount = list_length(centerList);
+
+    index_close(indexRelation, AccessShareLock);
+    relation_close(heapRelation, AccessShareLock);
+
+    if (centerCount <= 0) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("HNSW distribution could not generate any centers")));
+    }
+
+    if (centerCount != distributedTableParams->shardCount) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("HNSW center count does not match shard_count"),
+                        errdetail("shard_count is %d, but HNSW center count is %d.",
+                                  distributedTableParams->shardCount, centerCount)));
+    }
+
+    distributedTableParams->hnswIndexId = indexId;
+    distributedTableParams->hnswCenterList = centerList;
+}
+
+static Oid FindIvfflatIndexForDistributionColumn(Oid relationId, Var* distributionColumn)
+{
+    Oid ivfflatAmOid = get_am_oid("ivfflat", true);
+    Oid foundIndexId = InvalidOid;
+    Relation relation = NULL;
+    List* indexIdList = NIL;
+
+    if (!OidIsValid(ivfflatAmOid)) {
+        ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT),
+                        errmsg("ivfflat access method does not exist")));
+    }
+
+    if (distributionColumn == NULL || distributionColumn->vartype != VECTOROID) {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("IVF distribution requires a vector distribution column")));
+    }
+
+    relation = relation_open(relationId, NoLock);
+    indexIdList = RelationGetIndexList(relation);
+
+    Oid indexId = InvalidOid;
+    foreach_declared_oid(indexId, indexIdList)
+    {
+        Relation indexRelation = index_open(indexId, AccessShareLock);
+        Form_pg_index indexForm = indexRelation->rd_index;
+        bool matchesDistributionColumn =
+            indexForm->indnatts == 1 &&
+            indexForm->indkey.values[0] == distributionColumn->varattno;
+        bool matchesIvfflat = indexRelation->rd_rel->relam == ivfflatAmOid;
+        bool isValidIndex = IndexIsValid(indexForm);
+
+        if (matchesIvfflat && matchesDistributionColumn && isValidIndex) {
+            Oid distanceProc = index_getprocid(indexRelation, 1, IVFFLAT_DISTANCE_PROC);
+            char* distanceProcName =
+                OidIsValid(distanceProc) ? get_func_name(distanceProc) : NULL;
+            bool usesL2Distance =
+                distanceProcName != NULL &&
+                strcmp(distanceProcName, "vector_l2_squared_distance") == 0;
+
+            if (!usesL2Distance) {
+                index_close(indexRelation, AccessShareLock);
+                continue;
+            }
+
+            foundIndexId = indexId;
+            index_close(indexRelation, AccessShareLock);
+            break;
+        }
+
+        index_close(indexRelation, AccessShareLock);
+    }
+
+    relation_close(relation, NoLock);
+
+    if (!OidIsValid(foundIndexId)) {
+        ereport(
+            ERROR,
+            (errcode(ERRCODE_UNDEFINED_OBJECT),
+             errmsg("could not find a valid L2 ivfflat index for IVF distribution"),
+             errhint(
+                 "Create an ivfflat index with vector_l2_ops on the distribution vector "
+                 "column before calling create_distributed_table(..., 'ivf').")));
+    }
+
+    return foundIndexId;
+}
+
+static Oid FindHnswIndexForDistributionColumn(Oid relationId, Var* distributionColumn)
+{
+    Oid hnswAmOid = get_am_oid("hnsw", true);
+    Oid foundIndexId = InvalidOid;
+    Relation relation = NULL;
+    List* indexIdList = NIL;
+
+    if (!OidIsValid(hnswAmOid)) {
+        ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT),
+                        errmsg("hnsw access method does not exist")));
+    }
+
+    if (distributionColumn == NULL || distributionColumn->vartype != VECTOROID) {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("HNSW distribution requires a vector distribution column")));
+    }
+
+    relation = relation_open(relationId, NoLock);
+    indexIdList = RelationGetIndexList(relation);
+
+    Oid indexId = InvalidOid;
+    foreach_declared_oid(indexId, indexIdList)
+    {
+        Relation indexRelation = index_open(indexId, AccessShareLock);
+        Form_pg_index indexForm = indexRelation->rd_index;
+        bool matchesDistributionColumn =
+            indexForm->indnatts == 1 &&
+            indexForm->indkey.values[0] == distributionColumn->varattno;
+        bool matchesHnsw = indexRelation->rd_rel->relam == hnswAmOid;
+        bool isValidIndex = IndexIsValid(indexForm);
+
+        if (matchesHnsw && matchesDistributionColumn && isValidIndex) {
+            Oid distanceProc = index_getprocid(indexRelation, 1, HNSW_DISTANCE_PROC);
+            char* distanceProcName =
+                OidIsValid(distanceProc) ? get_func_name(distanceProc) : NULL;
+            bool usesL2Distance =
+                distanceProcName != NULL &&
+                strcmp(distanceProcName, "vector_l2_squared_distance") == 0;
+
+            if (!usesL2Distance) {
+                index_close(indexRelation, AccessShareLock);
+                continue;
+            }
+
+            foundIndexId = indexId;
+            index_close(indexRelation, AccessShareLock);
+            break;
+        }
+
+        index_close(indexRelation, AccessShareLock);
+    }
+
+    relation_close(relation, NoLock);
+
+    if (!OidIsValid(foundIndexId)) {
+        ereport(
+            ERROR,
+            (errcode(ERRCODE_UNDEFINED_OBJECT),
+             errmsg("could not find a valid L2 hnsw index for HNSW distribution"),
+             errhint("Create an hnsw index with vector_l2_ops on the distribution vector "
+                     "column before calling create_distributed_table(..., 'hnsw').")));
+    }
+
+    return foundIndexId;
 }
 
 /*

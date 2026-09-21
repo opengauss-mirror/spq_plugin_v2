@@ -18,6 +18,8 @@
 
 #include "postgres.h"
 
+#include "access/datavec/ivfflat.h"
+#include "access/datavec/vector.h"
 #include "c.h"
 #include "fmgr.h"
 #include "libpq/libpq-fe.h"
@@ -191,6 +193,135 @@ void CreateShardsWithRoundRobinPolicy(Oid distributedTableId, int32 shardCount,
 
     CreateShardsOnWorkers(distributedTableId, insertedShardPlacements,
                           useExclusiveConnections);
+}
+
+static text* VectorCenterToText(Vector* center)
+{
+    char* centerCString =
+        DatumGetCString(DirectFunctionCall1(vector_out, PointerGetDatum(center)));
+
+    return cstring_to_text(centerCString);
+}
+
+/*
+ * CreateVectorCenterShardsWithRoundRobinPolicy creates one shard per vector center and
+ * stores the center vector in the shard interval min/max values.
+ */
+void CreateVectorCenterShardsWithRoundRobinPolicy(Oid distributedTableId,
+                                                  List* centerList,
+                                                  int32 replicationFactor,
+                                                  bool useExclusiveConnections)
+{
+    CitusTableCacheEntry* cacheEntry = GetCitusTableCacheEntry(distributedTableId);
+    List* insertedShardPlacements = NIL;
+    List* insertedShardIds = NIL;
+    int32 shardCount = list_length(centerList);
+
+    if (cacheEntry->partitionMethod != DISTRIBUTE_BY_IVF &&
+        cacheEntry->partitionMethod != DISTRIBUTE_BY_HNSW) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+                        errmsg("table is not vector-center distributed")));
+    }
+
+    EnsureTableOwner(distributedTableId);
+    LockRelationOid(distributedTableId, ExclusiveLock);
+
+    List* existingShardList = LoadShardList(distributedTableId);
+    if (existingShardList != NIL) {
+        char* tableName = get_rel_name(distributedTableId);
+        ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                        errmsg("table \"%s\" has already had shards created for it",
+                               tableName)));
+    }
+
+    if (shardCount <= 0) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("vector center count must be positive")));
+    }
+
+    if (replicationFactor <= 0) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("replication_factor must be positive")));
+    }
+
+    if (cacheEntry->replicationModel == REPLICATION_MODEL_STREAMING &&
+        replicationFactor > 1) {
+        char* relationName = get_rel_name(cacheEntry->relationId);
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("using replication factor %d with the streaming "
+                               "replication model is not supported",
+                               replicationFactor),
+                        errdetail("The table %s is marked as streaming replicated and "
+                                  "the shard replication factor of streaming replicated "
+                                  "tables must be 1.",
+                                  relationName),
+                        errhint("Use replication factor 1.")));
+    }
+
+    LockRelationOid(DistNodeRelationId(), RowShareLock);
+
+    List* workerNodeList = DistributedTablePlacementNodeList(NoLock);
+    workerNodeList = SortList(workerNodeList, CompareWorkerNodes);
+
+    int32 workerNodeCount = list_length(workerNodeList);
+    if (replicationFactor > workerNodeCount) {
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                        errmsg("replication_factor (%d) exceeds number of worker nodes "
+                               "(%d)",
+                               replicationFactor, workerNodeCount),
+                        errhint("Add more worker nodes or try again with a lower "
+                                "replication factor.")));
+    }
+
+    char shardStorageType = ShardStorageType(distributedTableId);
+    ListCell* centerCell = NULL;
+    int64 shardIndex = 0;
+    foreach (centerCell, centerList) {
+        Vector* center = (Vector*)lfirst(centerCell);
+        uint32 roundRobinNodeIndex = shardIndex % workerNodeCount;
+        uint64* shardIdPtr = (uint64*)palloc0(sizeof(uint64));
+        *shardIdPtr = GetNextShardId();
+        insertedShardIds = lappend(insertedShardIds, shardIdPtr);
+
+        text* centerText = VectorCenterToText(center);
+        InsertShardRow(distributedTableId, *shardIdPtr, shardStorageType, centerText,
+                       centerText);
+
+        InsertShardPlacementRows(distributedTableId, *shardIdPtr, workerNodeList,
+                                 roundRobinNodeIndex, replicationFactor);
+        shardIndex++;
+    }
+
+    uint64* shardIdPtr;
+    foreach_declared_ptr(shardIdPtr, insertedShardIds)
+    {
+        List* placementsForShard = ShardPlacementList(*shardIdPtr);
+        insertedShardPlacements =
+            list_concat(insertedShardPlacements, placementsForShard);
+    }
+
+    CreateShardsOnWorkers(distributedTableId, insertedShardPlacements,
+                          useExclusiveConnections);
+}
+
+/*
+ * CreateIvfShardsWithRoundRobinPolicy creates one shard per IVF center and
+ * stores the center vector in the shard interval min/max values.
+ */
+void CreateIvfShardsWithRoundRobinPolicy(Oid distributedTableId, List* centerList,
+                                         int32 replicationFactor,
+                                         bool useExclusiveConnections)
+{
+    List* vectorCenterList = NIL;
+    IvfflatCenterData* center = NULL;
+
+    foreach_declared_ptr(center, centerList)
+    {
+        vectorCenterList = lappend(vectorCenterList, center->center);
+    }
+
+    CreateVectorCenterShardsWithRoundRobinPolicy(
+        distributedTableId, vectorCenterList, replicationFactor, useExclusiveConnections);
 }
 
 /*
