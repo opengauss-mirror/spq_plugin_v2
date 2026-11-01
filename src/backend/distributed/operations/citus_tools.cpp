@@ -538,6 +538,7 @@ typedef struct Bm25DfEntry {
 } Bm25DfEntry;
 
 static THR_LOCAL char* Bm25QueryPrefix = NULL;
+static THR_LOCAL MemoryContext Bm25QueryPrefixContext = NULL;
 
 static char* Bm25ShardTableRegex(const char* tableName)
 {
@@ -654,18 +655,31 @@ static bool Bm25ParseShardStat(char* shard, uint64* totalN, uint64* totalT,
     return sawN && sawT;
 }
 
+/*
+ * The prefix is set in ExecutorStart and released after ExecutorRun, possibly
+ * by an enclosing executor that outlives the portal of a nested statement, so
+ * it must not live in the memory of the statement that computed it.
+ */
 static void Bm25SetQueryPrefix(const char* stat)
 {
-    if (Bm25QueryPrefix != NULL) {
-        pfree(Bm25QueryPrefix);
+    ResetBm25GlobalStatQueryPrefix();
+
+    if (Bm25QueryPrefixContext == NULL) {
+        Bm25QueryPrefixContext = AllocSetContextCreate(
+            TopMemoryContext, "Spq BM25 Query Prefix Context", ALLOCSET_SMALL_SIZES);
     }
+
+    char* quotedStat = quote_literal_cstr(stat);
+    MemoryContext oldContext = MemoryContextSwitchTo(Bm25QueryPrefixContext);
     StringInfo prefix = makeStringInfo();
     appendStringInfo(prefix,
                      "SET LOCAL enable_bm25_global_idf = on;"
                      "SET LOCAL bm25_global_stat = %s;",
-                     quote_literal_cstr(stat));
+                     quotedStat);
     Bm25QueryPrefix = prefix->data;
     pfree(prefix);
+    MemoryContextSwitchTo(oldContext);
+    pfree(quotedStat);
 }
 
 static void Bm25SetLocalGuc(const char* name, const char* value)
