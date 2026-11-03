@@ -390,9 +390,13 @@ void CitusExecutorRun(QueryDesc* queryDesc, ScanDirection direction, long count)
 
         Session_ctx::ExecCtx().executorBoundParams = savedBoundParams;
         Session_ctx::ExecCtx().ExecutorLevel--;
-        if (Session_ctx::ExecCtx().ExecutorLevel == 0) {
-            ResetBm25GlobalStatQueryPrefix();
-        }
+        /*
+         * The prefix belongs to the statement whose ExecutorStart computed it.
+         * Drop it when any executor level finishes, so the prefix of a nested
+         * statement (the SELECT of an INSERT ... SELECT that is pulled to the
+         * coordinator) does not outlive it.
+         */
+        ResetBm25GlobalStatQueryPrefix();
 
         if (Session_ctx::ExecCtx().ExecutorLevel == 0 &&
             Session_ctx::PlanCtx().PlannerLevel == 0) {
@@ -422,9 +426,7 @@ void CitusExecutorRun(QueryDesc* queryDesc, ScanDirection direction, long count)
 
         Session_ctx::ExecCtx().executorBoundParams = savedBoundParams;
         Session_ctx::ExecCtx().ExecutorLevel--;
-        if (Session_ctx::ExecCtx().ExecutorLevel == 0) {
-            ResetBm25GlobalStatQueryPrefix();
-        }
+        ResetBm25GlobalStatQueryPrefix();
 
         if (Session_ctx::ExecCtx().ExecutorLevel == 0 &&
             Session_ctx::PlanCtx().PlannerLevel == 0) {
