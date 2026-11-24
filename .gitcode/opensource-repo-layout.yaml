@@ -1,0 +1,20 @@
+project: opengauss/spq_plugin_v2
+version: "1.0"
+
+directories:
+  - path: "./src/"
+    type: source
+  - path: "./src/test/"
+    type: test
+  - path: "./src/backend/distributed/test/"
+    type: test
+  - path: "./vendor/safestringlib/"
+    type: third_party
+  - path: "./ci/"
+    type: build
+
+files:
+  - path: "./LICENSE"
+    type: license
+  - path: "./.gitcode/copyright-template.txt"
+    type: copyright-template
