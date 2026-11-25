@@ -4,6 +4,28 @@ version: "1.0"
 directories:
   - path: "./src/"
     type: source
+  # Preserve mixed upstream and independently licensed code; check the
+  # adapted AGPL components below using the more specific source rules.
+  - path: "./src/backend/distributed/"
+    type: upstream
+  - path: "./src/backend/distributed/commands/"
+    type: source
+  - path: "./src/backend/distributed/connection/"
+    type: source
+  - path: "./src/backend/distributed/metadata/"
+    type: source
+  - path: "./src/backend/distributed/planner/"
+    type: source
+  - path: "./src/backend/distributed/progress/"
+    type: source
+  - path: "./src/backend/distributed/relay/"
+    type: source
+  - path: "./src/backend/distributed/transaction/"
+    type: source
+  - path: "./src/backend/distributed/version/"
+    type: source
+  - path: "./src/backend/distributed/worker/"
+    type: source
   - path: "./src/test/"
     type: test
   - path: "./src/backend/distributed/test/"
